@@ -1,0 +1,1673 @@
+﻿//! Application shell: owns the Slint windows, the avatar stage, timers and global input.//! //! Threading rule: Slint components and this `App` are `!Send`, so worker threads capture only//! plain data and post closures back with `slint::invoke_from_event_loop`. Those closures look//! the handle up through [`with_app`], which is only valid on the UI thread.
+
+use slint::winit_030::{winit, WinitWindowAccessor};
+
+use slint::{ComponentHandle, Model, PhysicalPosition, PhysicalSize};
+
+use std::cell::RefCell;
+
+use std::rc::Rc;
+
+use std::time::{Duration, Instant};
+
+use crate::brain::brain;
+
+use crate::config;
+
+slint::include_modules!();
+/// The Slint-generated windows and row structs, re-exported so every module names them/// through `crate::app`.pub
+
+mod types {
+    pub use crate::app::slint_generatedContextMenu::{
+        Choice, ContextMenu, ControlCenter, DeviceEntry, EmotionRow, FactRow, MascotWindow,
+        PropCell, QuickDial, TraitRow,
+    };
+}
+pub use types::*;
+pub const STAGE_BASE_W: f32 = 260.0;
+pub const STAGE_BASE_H: f32 = 370.0;
+/// Mutable UI-thread state. Never leaves the UI thread.
+pub struct App {
+    pub ui: MascotWindow,
+    pub studio: Option<ControlCenter>,
+    pub menu: Option<ContextMenu>,
+    pub dial: Option<QuickDial>,
+    pub stage: crate::stage::StageHandle,
+    pub pos: (i32, i32),
+    pub target: Option<(i32, i32)>,
+    pub post_walk_emotion: String,
+    pub facing_right: bool,
+    pub dragging: bool,
+    pub drag_origin: Option<(i32, i32, i32, i32)>,
+    pub peeking: String,
+    pub user_placed: bool,
+    pub stationary_since: Instant,
+    pub roaming: bool,
+    pub clipboard_watch: bool,
+    pub last_clipboard: String,
+    pub game_compacted: bool,
+    pub pre_game_scale: f32,
+    pub pre_game_pos: Option<(i32, i32)>,
+    pub last_copilot_vision: Instant,
+    pub busy: bool,
+    pub full_bubble_text: String,
+    pub typed: usize,
+    pub bubble_hide_at: Option<Instant>,
+    pub last_emotion: String,
+    pub speaking_until: Option<Instant>,
+    pub live_duplex: bool,
+    pub duplex_pending: bool,
+    pub persona: String,
+    pub accent: (String, String, String),
+    pub music_vibing: bool,
+    pub last_discord: Instant,
+    pub quitting: bool,
+    pub bar_pinned_open: bool,
+    /// Owned so they are dropped (and stopped) with the app instead of leaked.
+    pub timers: Vec<slint::Timer>,
+}
+
+pub type AppHandle = Rc<RefCell<App>>;
+
+thread_local! {
+
+static CURRENT: RefCell<Option<AppHandle>> =
+
+const { RefCell::new(None) };}
+pub fn set_current(handle: &AppHandle) {
+    CURRENT.with(|slot| *slot.borrow_mut() = Some(handle.clone()));
+}
+/// Runs `f` against the live app handle. UI thread only; a no-op elsewhere.
+pub fn with_app<R>(f: impl FnOnce(&AppHandle) -> R) -> Option<R> {
+    CURRENT.with(|slot| {
+        let borrowed = slot.borrow();
+        borrowed.as_ref().map(f)
+    })
+}
+
+thread_local! {
+    /// Guards against re-entrant UI mutation: Slint may evaluate a binding that calls back into
+    /// `say` or `sync_chrome` while one is already running, and a second `borrow_mut` would panic.
+    static IN_MUTATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Work that arrived while a mutation was in flight. Draining happens once the outer
+    /// mutation finishes, so nested callbacks are deferred rather than silently dropped.
+    static DEFERRED: RefCell<Vec<Box<dyn FnOnce(&AppHandle)>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Runs `f` with exclusive access to the app.
+///
+/// If a mutation is already in progress the work is queued and run immediately after the
+/// current one finishes instead of being dropped.
+pub fn try_with_app_mut<R>(f: impl FnOnce(&AppHandle) -> R) -> Option<R> {
+    if IN_MUTATION.with(|flag| flag.get()) {
+        return None;
+    }
+    IN_MUTATION.with(|flag| flag.set(true));
+    let result = with_app(f);
+    IN_MUTATION.with(|flag| flag.set(false));
+    drain_deferred();
+    result
+}
+
+/// Sends `f` to the UI thread from a worker. UI-thread callers should use [`defer`].
+pub fn post(f: impl FnOnce(&AppHandle) + Send + 'static) {
+    let _ = slint::invoke_from_event_loop(move || {
+        defer(f);
+    });
+}
+
+/// Same contract as [`post`], without requiring `Send` (UI-thread callers).
+pub fn defer(f: impl FnOnce(&AppHandle) + 'static) {
+    if IN_MUTATION.with(|flag| flag.get()) {
+        DEFERRED.with(|slot| slot.borrow_mut().push(Box::new(f)));
+        return;
+    }
+    IN_MUTATION.with(|flag| flag.set(true));
+    let _ = with_app(f);
+    IN_MUTATION.with(|flag| flag.set(false));
+    drain_deferred();
+}
+
+fn drain_deferred() {
+    loop {
+        // Take one item at a time so a callback that queues more work is handled in order.
+        let next = DEFERRED.with(|slot| {
+            let mut queue = slot.borrow_mut();
+            if queue.is_empty() {
+                None
+            } else {
+                Some(queue.remove(0))
+            }
+        });
+        let Some(next) = next else { return };
+        if DEFERRED.with(|slot| slot.borrow().len()) > 64 {
+            log::warn!("deferred UI queue is backing up; dropping the rest");
+            DEFERRED.with(|slot| slot.borrow_mut().clear());
+            return;
+        }
+        IN_MUTATION.with(|flag| flag.set(true));
+        let _ = with_app(next);
+        IN_MUTATION.with(|flag| flag.set(false));
+    }
+}
+pub fn hex_to_color(hex: &str) -> slint::Color {
+    let clean = hex.trim_start_matches('#');
+    let parse = |range: std::ops::Range<usize>| u8::from_str_radix(&clean[range], 16).unwrap_or(0);
+    if clean.len() >= 6 {
+        slint::Color::from_rgb_u8(parse(0..2), parse(2..4), parse(4..6))
+    } else {
+        slint::Color::from_rgb_u8(56, 189, 248)
+    }
+}
+/// Derives the wash/edge tints from the accent so chrome always agrees with her mood.
+pub fn accent_tints(hex: &str) -> (String, String) {
+    let clean = hex.trim_start_matches('#');
+    if clean.len() < 6 {
+        return ("#12232c".into(), "#1f5f7a".into());
+    }
+    let parse =
+        |r: std::ops::Range<usize>| u8::from_str_radix(&clean[r], 16).unwrap_or(80) as f32 / 255.0;
+    let (r, g, b) = (parse(0..2), parse(2..4), parse(4..6));
+    let to_hex = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+    let wash = format!(
+        "#{:02x}{:02x}{:02x}",
+        to_hex(r * 0.13 + 0.05),
+        to_hex(g * 0.13 + 0.055),
+        to_hex(b * 0.13 + 0.065)
+    );
+    let edge = format!(
+        "#{:02x}{:02x}{:02x}",
+        to_hex(r * 0.52 + 0.05),
+        to_hex(g * 0.52 + 0.06),
+        to_hex(b * 0.52 + 0.07)
+    );
+    (wash, edge)
+}
+pub fn init() -> Result<AppHandle, slint::PlatformError> {
+    let ui = MascotWindow::new()?;
+    let scale = config::get().avatar_scale;
+    ui.set_stage_w(STAGE_BASE_W * scale);
+    ui.set_stage_h(STAGE_BASE_H * scale);
+    let stage = crate::stage::new_handle();
+    let app: AppHandle = Rc::new(RefCell::new(App {
+        ui,
+        studio: None,
+        menu: None,
+        dial: None,
+        stage,
+        pos: (0, 0),
+        target: None,
+        post_walk_emotion: "idle".into(),
+        facing_right: false,
+        dragging: false,
+        drag_origin: None,
+        peeking: "none".into(),
+        user_placed: false,
+        stationary_since: Instant::now(),
+        roaming: true,
+        clipboard_watch: true,
+        last_clipboard: String::new(),
+        game_compacted: false,
+        pre_game_scale: 1.0,
+        pre_game_pos: None,
+        last_copilot_vision: Instant::now(),
+        busy: false,
+        full_bubble_text: String::new(),
+        typed: 0,
+        bubble_hide_at: None,
+        last_emotion: "idle".into(),
+        speaking_until: None,
+        live_duplex: false,
+        duplex_pending: false,
+        persona: String::new(),
+        accent: (String::new(), String::new(), String::new()),
+        music_vibing: false,
+        last_discord: Instant::now(),
+        quitting: false,
+        bar_pinned_open: false,
+        timers: Vec::new(),
+    }));
+    set_current(&app);
+    wire_callbacks(&app);
+    apply_persona(&app);
+    setup_window(&app);
+    install_hotkeys();
+    attach_stage(&app);
+    start_timers(&app);
+    greeting(&app);
+    sync_chrome(&app);
+    Ok(app)
+}
+
+fn setup_window(app: &AppHandle) {
+    app.borrow().ui.window().with_winit_window(|w| {
+        w.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        w.set_decorations(false);
+        w.set_resizable(false);
+        w.set_transparent(true);
+    });
+    let scale = config::get().avatar_scale;
+    let (_, _, aw, ah) = crate::win32::work_area();
+    let width = (STAGE_BASE_W * scale + 24.0).round() as i32;
+    let height = (STAGE_BASE_H * scale + 96.0).round() as i32;
+    let x = (aw - width - 40).max(20);
+    let y = (ah - height - 20).max(20);
+    app.borrow()
+        .ui
+        .window()
+        .set_size(PhysicalSize::new(width as u32, height as u32));
+    app.borrow()
+        .ui
+        .window()
+        .set_position(PhysicalPosition::new(x, y));
+    app.borrow_mut().pos = (x, y);
+}
+/// Recomputes the window height from the current chrome (bubble + bar).
+pub fn sync_chrome(app: &AppHandle) {
+    let scale = config::get().avatar_scale;
+    let (bubble, bar, capsule_mode) = {
+        let a = app.borrow();
+        (
+            a.ui.get_subtitles() && a.ui.get_bubble_shown(),
+            a.ui.get_bar_visible(),
+            a.ui.get_capsule_mode(),
+        )
+    };
+    let chrome = if bar || !capsule_mode { 44.0 } else { 34.0 };
+    let bubble_h = if bubble { 74.0 } else { 0.0 };
+    let width = (STAGE_BASE_W * scale + 24.0).round() as u32;
+    let height = (STAGE_BASE_H * scale + chrome + bubble_h + 10.0).round() as u32;
+    app.borrow()
+        .ui
+        .window()
+        .set_size(PhysicalSize::new(width, height));
+    sync_stage_size(app, scale);
+}
+
+fn sync_stage_size(app: &AppHandle, scale: f32) {
+    let a = app.borrow();
+    a.ui.set_stage_w(STAGE_BASE_W * scale);
+    a.ui.set_stage_h(STAGE_BASE_H * scale);
+    let _ = a.ui.get_stage_x();
+}
+
+fn wire_callbacks(app: &AppHandle) {
+    let weak = app.borrow().ui.as_weak();
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_send_text(move |text| submit_prompt(&app, text.to_string(), false));
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_toggle_vision(move || {
+    let next = !app.borrow().ui.get_vision();
+    app.borrow().ui.set_vision(next);
+    say(                    &app,                    &config::flav(if next {
+    "Continuous screen vision is on ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â I can see your screen while we talk."                    } else {
+    "I'll only look at your screen when you ask me to."                    }),                    if next { "annoyed" } else { "idle" },                    vec![format!("screen vision {}", if next { "on" } else { "off" })],                    false,                );
+    });
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_toggle_mic(move || toggle_mic(&app));
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_toggle_tts(move || {
+                let next = !config::get().tts_enabled;
+                config::update(|s| s.tts_enabled = next);
+                app.borrow().ui.set_tts(next);
+                if !next {
+                    crate::voice::stop_speaking();
+                    app.borrow().stage.borrow_mut().stop_audio();
+                }
+                say(
+                    &app,
+                    &config::flav(if next {
+                        "My voice is back on."
+                    } else {
+                        "You muted my voice ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â I'll
+
+use text for now."
+                    }),
+                    if next { "talking" } else { "annoyed" },
+                    vec![],
+                    false,
+                );
+                sync_studio(&app);
+            });
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_toggle_subtitles(move || {
+                let next = !config::get().subtitles_enabled;
+                config::update(|s| s.subtitles_enabled = next);
+                app.borrow().ui.set_subtitles(next);
+                if !next {
+                    hide_bubble(&app);
+                }
+                sync_chrome(&app);
+                sync_studio(&app);
+            });
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_open_studio(move || open_studio(&app));
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_collapse_bar(move || {
+                app.borrow().ui.set_bar_visible(false);
+                app.borrow_mut().bar_pinned_open = false;
+                sync_chrome(&app);
+            });
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_expand_bar(move || {
+                app.borrow().ui.set_bar_visible(true);
+                app.borrow_mut().bar_pinned_open = true;
+                sync_chrome(&app);
+            });
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            ui.on_open_quick_dial(move || open_quick_dial(&app));
+        }
+    }
+}
+/// Persona to accent colour, across every window.
+pub fn apply_persona(app: &AppHandle) {
+    let key = config::current_persona();
+    let profile = config::persona(&key);
+    let (wash, edge) = accent_tints(profile.accent);
+    {
+        let mut a = app.borrow_mut();
+        if a.persona == key && a.accent.0 == profile.accent {
+            return;
+        }
+        a.persona = key.clone();
+        a.accent = (profile.accent.to_string(), wash.clone(), edge.clone());
+        let ui = &a.ui;
+        ui.set_accent_color(hex_to_color(profile.accent));
+        ui.set_accent_wash(hex_to_color(&wash));
+        ui.set_accent_edge(hex_to_color(&edge));
+        ui.set_persona_badge(profile.short_badge.into());
+        ui.set_persona_name(profile.name.into());
+    }
+    let color = hex_to_color(profile.accent);
+    let wash_color = hex_to_color(&wash);
+    let edge_color = hex_to_color(&edge);
+    {
+        let a = app.borrow();
+        if let Some(studio) = a.studio.as_ref() {
+            studio.set_accent_color(color);
+            studio.set_accent_wash(wash_color);
+            studio.set_accent_edge(edge_color);
+            studio.set_mood_badge(profile.short_badge.into());
+        }
+        if let Some(menu) = a.menu.as_ref() {
+            menu.set_accent_color(color);
+            menu.set_accent_wash(wash_color);
+            menu.set_accent_edge(edge_color);
+            menu.set_mood_badge(profile.short_badge.into());
+        }
+        if let Some(dial) = a.dial.as_ref() {
+            dial.set_accent_color(color);
+            dial.set_accent_wash(wash_color);
+            dial.set_accent_edge(edge_color);
+        }
+    }
+    sync_studio(app);
+}
+
+fn greeting(app: &AppHandle) {
+    let key = config::current_persona();
+    let line = match key.as_str() {
+    "yandere" => "I'm right here on your desktop watching over you. We're going to get so much done today.",
+        "tomboy" => "Aria reporting in! Tell me what we're tackling first today.",
+        "bakadere" => "Yaaay, you're here! I dropped my pencil five times waiting, but now my day is 100% amazing.",
+        "kuudere" => "Aria operational. Diagnostics optimal. Standing by.",
+        "genki" => "GOOD MORNING! Aria is pumped and 1000% ready to make today the greatest day ever.",
+        "meganekko" => "*adjusts glasses* Aria reporting for duty. Cognitive engine primed. What problem shall we solve today?",
+        _ => "Good job today! I just happened to be nearby on your desktop if you need anything.",    };
+    say(app, &config::flav(line), "talking", vec![], true);
+    let mut warm: Vec<(String, String)> = vec![(line.to_string(), "talking".into())];
+    for kind in ["poke", "shake", "headpat"] {
+        if let Some(text) = crate::reactions::first_line(&key, kind) {
+            let emotion = match kind {
+                "poke" => "annoyed",
+                "shake" => "dizzy",
+                _ => "happy",
+            };
+            warm.push((text, emotion.into()));
+        }
+    }
+    crate::voice::precache(&warm);
+}
+/// The single speech path: bubble, stage expression, voice, auto-hide.
+pub fn say(app: &AppHandle, text: &str, emotion: &str, logs: Vec<String>, speak: bool) {
+    let tts_on = {
+        let mut a = app.borrow_mut();
+        a.full_bubble_text = text.to_string();
+        a.typed = 0;
+        a.last_emotion = emotion.to_string();
+        let subtitles = config::get().subtitles_enabled;
+        let tts_on = config::get().tts_enabled;
+        a.ui.set_bubble_text("".into());
+        a.ui.set_bubble_shown(subtitles);
+        a.ui.set_status_line(status_for(emotion).into());
+        tts_on
+    };
+    let duration_ms = ((text.chars().count() as f32) * 58.0).clamp(2200.0, 9500.0) as u64;
+    app.borrow_mut().bubble_hide_at =
+        Some(Instant::now() + Duration::from_millis(duration_ms + 3200));
+    sync_chrome(app);
+    {
+        let a = app.borrow();
+        let stage = a.stage.clone();
+        let mut stage = stage.borrow_mut();
+        if matches!(emotion, "dance" | "groove") {
+            stage.set_music_vibe(true, 1.0);
+        } else if ["idle", "sleepy", "walking", "sit", "annoyed"].contains(&emotion) {
+            stage.set_music_vibe(false, 0.0);
+        }
+        stage.set_state(emotion, a.facing_right, a.target.is_some(), speak && tts_on);
+    }
+    for entry in &logs {
+        log::info!("{entry}");
+    }
+    if speak {
+        if tts_on {
+            crate::voice::speak_async(text, emotion);
+        }
+        app.borrow_mut().speaking_until = Some(Instant::now() + Duration::from_millis(duration_ms));
+    }
+    if let Some(studio) = app.borrow().studio.as_ref() {
+        studio.set_status_text(logs.first().cloned().unwrap_or_default().into());
+    }
+}
+
+fn status_for(emotion: &str) -> &'static str {
+    match emotion {
+        "talking" => "Speaking",
+        "happy" => "Feeling good",
+        "annoyed" => "Pouting",
+        "walking" => "Walking",
+        "dance" => "Dancing",
+        "groove" => "Vibing",
+        "sit" => "Sitting",
+        "sleepy" => "Resting",
+        _ => "Standing by",
+    }
+}
+pub fn hide_bubble(app: &AppHandle) {
+    app.borrow().ui.set_bubble_shown(false);
+    app.borrow_mut().bubble_hide_at = None;
+    sync_chrome(app);
+}
+pub fn toggle_mic(app: &AppHandle) {
+    if crate::voice::is_recording() {
+        stop_mic(app);
+        return;
+    }
+    app.borrow().stage.borrow_mut().stop_audio();
+    if crate::voice::start_recording() {
+        app.borrow().ui.set_recording(true);
+        say(            app,            "Listening ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â click the mic again when you're done.",            "idle",            vec!["recording from the microphone".into()],            false,        );
+    } else {
+        say(
+            app,
+            &config::flav(
+                "I couldn't reach your microphone. Check that an input device is connected.",
+            ),
+            "annoyed",
+            vec!["microphone unavailable".into()],
+            false,
+        );
+    }
+}
+
+fn stop_mic(app: &AppHandle) {
+    app.borrow().ui.set_recording(false);
+    let Some(wav) = crate::voice::stop_recording_wav() else {
+        say(
+            app,
+            &config::flav("I didn't hear anything on the mic. Try speaking a bit louder."),
+            "idle",
+            vec!["no audio captured".into()],
+            false,
+        );
+        return;
+    };
+    say(
+        app,
+        "TranscribingÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦",
+        "talking",
+        vec!["transcribing voice audio".into()],
+        false,
+    );
+    let include_screen = app.borrow().ui.get_vision();
+    std::thread::spawn(move || {
+        let text = crate::voice::transcribe_wav(&wav);
+        post(move |app| {
+            let clean = text.trim().to_string();
+            if clean.is_empty() {
+                say(
+                    app,
+                    &config::flav("I couldn't catch any speech. Speak clearly and try again."),
+                    "idle",
+                    vec!["no speech recognised".into()],
+                    false,
+                );
+                return;
+            }
+            submit_prompt(app, clean, include_screen);
+        });
+    });
+}
+pub fn submit_prompt(app: &AppHandle, prompt: String, include_screen: bool) {
+    if app.borrow().busy {
+        return;
+    }
+    {
+        let mut a = app.borrow_mut();
+        a.busy = true;
+        a.ui.set_busy(true);
+        a.ui.set_draft("".into());
+    }
+    if config::get().subtitles_enabled {
+        say(
+            app,
+            "ThinkingÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦",
+            "talking",
+            vec!["thinking".into()],
+            false,
+        );
+    }
+    std::thread::spawn(move || {
+        let reply = brain().chat(
+            &prompt,
+            include_screen,
+            &|location: &str, emotion: Option<&str>| {
+                let location = location.to_string();
+                let emotion = emotion.unwrap_or("walking").to_string();
+                post(move |app| walk_to(app, &location, &emotion));
+            },
+        );
+        post(move |app| {
+            {
+                let mut a = app.borrow_mut();
+                a.busy = false;
+                a.ui.set_busy(false);
+            }
+            let emotion = if app.borrow().target.is_some() {
+                "walking".to_string()
+            } else {
+                reply.emotion.clone()
+            };
+            say(app, &reply.text, &emotion, reply.logs.clone(), true);
+            apply_persona(app);
+        });
+    });
+}
+/// Named desktop positions, plus perching on the active window.
+pub fn walk_to(app: &AppHandle, location: &str, emotion: &str) {
+    let loc = location.to_lowercase();
+    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let (w, h) = window_size(app);
+    let margin = 25;
+    let (_, cy) = app.borrow().pos;
+    let (tx, ty) = match loc.as_str() {
+        "left" => (sx + margin, cy),
+        "right" => (sx + sw - w - margin, cy),
+        "center" => (sx + (sw - w) / 2, sy + (sh - h) / 2),
+        "top_left" => (sx + margin, sy + margin),
+        "top_right" => (sx + sw - w - margin, sy + margin),
+        "bottom_left" => (sx + margin, sy + sh - h - margin),
+        "bottom_right" => (sx + sw - w - margin, sy + sh - h - margin),
+        "perch" => perch_point(app).unwrap_or((sx + sw - w - margin, sy + margin)),
+        _ => (
+            crate::util::rand_range(sx + margin, (sx + sw - w - margin).max(sx + margin)),
+            crate::util::rand_range(
+                (sy + sh - h - 180).max(sy + margin),
+                (sy + sh - h - margin).max(sy + margin),
+            ),
+        ),
+    };
+    let facing = tx > app.borrow().pos.0;
+    {
+        let mut a = app.borrow_mut();
+        a.target = Some((tx, ty));
+        a.post_walk_emotion = if emotion == "walking" {
+            "idle".into()
+        } else {
+            emotion.to_string()
+        };
+        a.facing_right = facing;
+        a.user_placed = false;
+    }
+    app.borrow()
+        .stage
+        .borrow_mut()
+        .set_state("walking", facing, true, false);
+}
+
+fn perch_point(app: &AppHandle) -> Option<(i32, i32)> {
+    let win = crate::win32::active_window()?;
+    let lower = win.title.to_lowercase();
+    if lower.is_empty() || lower.contains("aria") || lower.contains("program manager") {
+        return None;
+    }
+    let (left, top, w, h) = crate::win32::window_rect(win.hwnd)?;
+    if w < 260 || h < 160 {
+        return None;
+    }
+    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let (awn, ahn) = window_size(app);
+    let tx = (left + w - awn - 35).clamp(sx + 10, (sx + sw - awn - 10).max(sx + 10));
+    let ty = (top - (ahn as f32 * 0.42) as i32).clamp(sy + 5, (sy + sh - ahn - 10).max(sy + 5));
+    Some((tx, ty))
+}
+pub fn window_size(app: &AppHandle) -> (i32, i32) {
+    let size = app.borrow().ui.window().size();
+    (size.width as i32, size.height as i32)
+}
+pub fn set_window_pos(app: &AppHandle, x: i32, y: i32) {
+    // Scope the read borrow so the write below cannot collide with it.
+    {
+        let a = app.borrow();
+        a.ui.window().set_position(PhysicalPosition::new(x, y));
+    }
+    app.borrow_mut().pos = (x, y);
+}
+
+/// Registers a repeating timer owned by the app, so dropping the app stops every timer.
+fn own_timer(app: AppHandle, interval: Duration, f: impl Fn() + 'static) {
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, interval, f);
+    app.borrow_mut().timers.push(timer);
+}
+
+fn start_timers(app: &AppHandle) {
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_millis(33), move || {
+            let _ = try_with_app_mut(|_| tick_motion(&app));
+        });
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_millis(6000), move || tick_proactive(&app));
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_millis(1800), move || tick_music(&app));
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_secs(18), move || tick_boredom(&app));
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_millis(90), move || {
+            let _ = try_with_app_mut(|_| tick_ui(&app));
+        });
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_millis(400), move || sync_stage_bounds(&app));
+    }
+    {
+        let app = app.clone();
+        own_timer(app.clone(), Duration::from_secs(15), move || {
+            if crate::discord::is_enabled() && app.borrow().last_discord.elapsed().as_secs() >= 15 {
+                app.borrow_mut().last_discord = Instant::now();
+                crate::discord::update("", "", &config::current_persona());
+            }
+        });
+    }
+    own_timer(app.clone(), Duration::from_secs(90), || {
+        crate::win32::trim_working_set();
+    });
+}
+fn sync_stage_bounds(app: &AppHandle) {
+    let (rect, scale) = {
+        let a = app.borrow();
+        let scale = a.ui.window().scale_factor();
+        (
+            crate::stage::StageRect {
+                x: a.ui.get_stage_x(),
+                y: a.ui.get_stage_y(),
+                width: a.ui.get_stage_w(),
+                height: a.ui.get_stage_h(),
+            },
+            scale,
+        )
+    };
+    app.borrow().stage.borrow_mut().set_bounds(rect, scale);
+}
+
+fn tick_motion(app: &AppHandle) {
+    let target = app.borrow().target;
+    if let Some((tx, ty)) = target {
+        if !app.borrow().dragging {
+            let (cx, cy) = app.borrow().pos;
+            let dx = tx - cx;
+            let dy = ty - cy;
+            let dist = ((dx * dx + dy * dy) as f64).sqrt();
+            let speed = 4.5;
+            if dist <= speed {
+                set_window_pos(app, tx, ty);
+                let (emotion, facing) = {
+                    let mut a = app.borrow_mut();
+                    a.target = None;
+                    (a.post_walk_emotion.clone(), a.facing_right)
+                };
+                app.borrow()
+                    .stage
+                    .borrow_mut()
+                    .set_state(&emotion, facing, false, false);
+                app.borrow().ui.set_status_line(status_for(&emotion).into());
+            } else {
+                let step_x = cx + ((dx as f64 / dist) * speed).round() as i32;
+                let step_y = cy + ((dy as f64 / dist) * speed).round() as i32;
+                set_window_pos(app, step_x, step_y);
+                let facing = dx > 0;
+                app.borrow_mut().facing_right = facing;
+                app.borrow()
+                    .stage
+                    .borrow_mut()
+                    .set_state("walking", facing, true, false);
+                app.borrow().ui.set_status_line("Walking".into());
+            }
+        }
+    }
+    let cursor = crate::input::cursor_position();
+    let (win_pos, (w, h)) = (app.borrow().pos, window_size(app));
+    let cx = win_pos.0 + w / 2;
+    let cy = win_pos.1 + h / 2;
+    let nx = ((cursor.0 - cx) as f32 / (w.max(100) as f32 * 1.5)).clamp(-1.0, 1.0);
+    let ny = ((cy - cursor.1) as f32 / (h.max(100) as f32)).clamp(-1.0, 1.0);
+    app.borrow().stage.borrow_mut().set_mouse_look(nx, ny);
+    if crate::voice::is_speaking() {
+        let emotion = app.borrow().last_emotion.clone();
+        app.borrow()
+            .stage
+            .borrow_mut()
+            .set_state(&emotion, false, false, true);
+    }
+}
+
+fn tick_proactive(app: &AppHandle) {
+    // The guardian samples windows, WASAPI sessions and sysinfo; none of that may run on the UI    // thread, so the whole check happens on a worker and only events come back.
+
+    static PROACTIVE_IN_FLIGHT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if PROACTIVE_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if app.borrow().busy || app.borrow().dragging || crate::voice::is_recording() {
+        PROACTIVE_IN_FLIGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::spawn(|| {
+            crate::proactive::observe_mood();
+            PROACTIVE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+        return;
+    }
+    PROACTIVE_IN_FLIGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+    std::thread::spawn(move || {
+        crate::proactive::observe_mood();
+        let game = crate::proactive::detect_active_game_or_fullscreen();
+        let event = crate::proactive::check_for_event();
+        PROACTIVE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        post(move |app| apply_proactive(app, game, event));
+    });
+}
+
+fn apply_proactive(
+    app: &AppHandle,
+    game: (bool, String),
+    event: Option<crate::proactive::ProactiveEvent>,
+) {
+    if let Some(change) = crate::mood::consume_change() {
+        log::info!(
+            "mood shift {} -> {} ({})",
+            change.old,
+            change.new,
+            change.reason
+        );
+        apply_persona(app);
+        if config::get().voice_follows_mood {
+            let target = config::persona(&change.new).voice;
+            config::update(|s| {
+                if s.tts_voice != target {
+                    s.tts_voice = target.to_string();
+                }
+            });
+        }
+    }
+    apply_game_state(app, game);
+    if app.borrow().busy || app.borrow().dragging || crate::voice::is_recording() {
+        return;
+    }
+    if let Some(event) = event {
+        if let Some(location) = &event.walk_location {
+            if location == "perch"
+                || event.category.starts_with("app_")
+                || event.category.contains("music")
+            {
+                if let Some(point) = perch_point(app) {
+                    let mut a = app.borrow_mut();
+                    a.target = Some(point);
+                    a.post_walk_emotion = event.emotion.clone();
+                }
+            } else {
+                walk_to(app, location, &event.emotion);
+            }
+        }
+        say(app, &event.message, &event.emotion, vec![event.badge], true);
+    }
+}
+/// Game-dodge state machine, fed by a worker-side detection result.
+
+fn apply_game_state(app: &AppHandle, detection: (bool, String)) {
+    if !config::get().smart_gaming_dodge_enabled && !config::get().automatic_game_copilot_enabled {
+        return;
+    }
+    let (is_game, game) = detection;
+    let compacted = app.borrow().game_compacted;
+    if is_game && !compacted {
+        {
+            let mut a = app.borrow_mut();
+            a.game_compacted = true;
+            a.pre_game_scale = config::get().avatar_scale;
+            a.pre_game_pos = Some(a.pos);
+            a.last_copilot_vision = Instant::now();
+        }
+        apply_scale(app, 0.52);
+        let (sx, sy, sw, sh) = crate::win32::work_area();
+        let (w, h) = window_size(app);
+        set_window_pos(app, sx + sw - (w as f32 * 0.86) as i32, sy + sh - h - 8);
+        set_peeking(app, "right");
+        let name = if game.is_empty() {
+            "a game".to_string()
+        } else {
+            game
+        };
+        say(
+            app,
+            &config::flav(&format!(
+                "Game detected ({name}). I'll cheer you on and watch your back from the corner."
+            )),
+            "talking",
+            vec![format!("game copilot active ({name})")],
+            true,
+        );
+    } else if !is_game && compacted {
+        app.borrow_mut().game_compacted = false;
+        set_peeking(app, "none");
+        let scale = app.borrow().pre_game_scale;
+        apply_scale(app, scale);
+        if let Some(pos) = app.borrow().pre_game_pos {
+            app.borrow_mut().target = Some(pos);
+        }
+        say(
+            app,
+            &config::flav("Back to your desktop. Restored to full size."),
+            "idle",
+            vec!["desktop restored".into()],
+            false,
+        );
+    } else if is_game && compacted && config::get().automatic_game_copilot_enabled {
+        if app.borrow().last_copilot_vision.elapsed().as_secs() >= 85 && !app.borrow().busy {
+            app.borrow_mut().last_copilot_vision = Instant::now();
+            let name = if game.is_empty() {
+                "a game".to_string()
+            } else {
+                game
+            };
+            let prompt = format!(                "You are Aria acting as an Automatic Live Game Co-Pilot for {name}. Look at this live screenshot right now. In your active character persona, give a punchy 1-sentence tactical observation, clutch callout, warning about health, ammo or enemies, or enthusiastic encouragement. Keep it under 25 words."            );
+            submit_prompt(app, prompt, true);
+        }
+    }
+}
+
+fn tick_music(app: &AppHandle) {
+    if !config::get().music_vibe_enabled {
+        if app.borrow().music_vibing {
+            app.borrow_mut().music_vibing = false;
+            app.borrow().stage.borrow_mut().set_music_vibe(false, 0.0);
+        }
+        return;
+    }
+    // Media and audio-session probes take tens to hundreds of milliseconds, so they run on a    // worker thread; only the resulting state change touches the UI.
+
+    static PROBE_IN_FLIGHT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if PROBE_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    PROBE_IN_FLIGHT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let was = app.borrow().music_vibing;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let media = crate::sysinfo::now_playing();
+        let mut playing = media.is_playing;
+        if !playing {
+            let activity = crate::audio::audio_activity(50);
+            let media_apps = [
+                "spotify.exe",
+                "chrome.exe",
+                "msedge.exe",
+                "firefox.exe",
+                "brave.exe",
+                "opera.exe",
+                "vlc.exe",
+            ];
+            playing = activity
+                .apps
+                .iter()
+                .any(|a| media_apps.contains(&a.name.to_lowercase().as_str()));
+        }
+        PROBE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+        post(move |app| apply_music_state(app, playing, was));
+    });
+    let _ = &handle;
+}
+
+fn apply_music_state(app: &AppHandle, playing: bool, was: bool) {
+    if playing != was {
+        app.borrow_mut().music_vibing = playing;
+        app.borrow().stage.borrow_mut().set_music_vibe(playing, 1.0);
+        app.borrow().ui.set_status_line(
+            if playing {
+                "Vibing to your music"
+            } else {
+                "Standing by"
+            }
+            .into(),
+        );
+    }
+}
+
+fn tick_boredom(app: &AppHandle) {
+    let (idle, can) = {
+        let a = app.borrow();
+        (
+            a.stationary_since.elapsed().as_secs_f64(),
+            !a.dragging && a.target.is_none() && !a.busy && !a.game_compacted && a.roaming,
+        )
+    };
+    if !can || idle < 210.0 {
+        return;
+    }
+    app.borrow_mut().stationary_since = Instant::now();
+    let key = config::current_persona();
+    let line = match key.as_str() {
+        "yandere" => {
+            "I've been watching you from this spot for so long. Let me walk a little closer."
+        }
+        "tomboy" => {
+            "Whew, my legs were getting stiff. Let's shake it off with a quick stretch walk."
+        }
+        _ => "Standing in the same spot forever is boring. I'm stretching my legs a bit.",
+    };
+    say(
+        app,
+        &config::flav(line),
+        "walking",
+        vec!["boredom walk".into()],
+        true,
+    );
+    walk_to(app, "roam", "idle");
+}
+
+fn tick_ui(app: &AppHandle) {
+    let (full, typed, shown) = {
+        let a = app.borrow();
+        (a.full_bubble_text.clone(), a.typed, a.ui.get_bubble_shown())
+    };
+    if shown && typed < full.chars().count() {
+        let next = (typed + 3).min(full.chars().count());
+        let visible: String = full.chars().take(next).collect();
+        app.borrow().ui.set_bubble_text(visible.into());
+        app.borrow_mut().typed = next;
+    }
+    let expired = app
+        .borrow()
+        .bubble_hide_at
+        .map(|t| Instant::now() >= t)
+        .unwrap_or(false);
+    if expired {
+        hide_bubble(app);
+    }
+    if app
+        .borrow()
+        .speaking_until
+        .map(|t| Instant::now() >= t)
+        .unwrap_or(false)
+    {
+        app.borrow_mut().speaking_until = None;
+        app.borrow_mut().duplex_pending = false;
+    }
+    tick_hover(app);
+    tick_clipboard(app);
+    apply_persona(app);
+}
+/// Capsule auto-collapse follows the cursor, unless the user pinned the bar open.
+
+fn tick_hover(app: &AppHandle) {
+    let settings = config::get();
+    if !settings.input_bar_visible || !settings.capsule_mode || !settings.capsule_autohide {
+        return;
+    }
+    if app.borrow().bar_pinned_open || app.borrow().dragging {
+        return;
+    }
+    let (x, y) = app.borrow().pos;
+    let (w, h) = window_size(app);
+    let cursor = crate::input::cursor_position();
+    let inside = cursor.0 >= x && cursor.0 <= x + w && cursor.1 >= y && cursor.1 <= y + h;
+    if app.borrow().ui.get_bar_visible() != inside {
+        app.borrow().ui.set_bar_visible(inside);
+        sync_chrome(app);
+    }
+}
+
+fn tick_clipboard(app: &AppHandle) {
+    if !app.borrow().clipboard_watch || app.borrow().busy {
+        return;
+    }
+    let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        return;
+    };
+    let Ok(text) = clipboard.get_text() else {
+        return;
+    };
+    let text = text.trim().to_string();
+    if text.len() < 25 || text.len() > 12000 {
+        return;
+    }
+    let signature: String = text.chars().take(160).collect();
+    if app.borrow().last_clipboard == signature {
+        return;
+    }
+    let markers = [
+        "Traceback (most recent call last)",
+        "SyntaxError:",
+        "TypeError:",
+        "AttributeError:",
+        "ModuleNotFoundError:",
+        "ImportError:",
+        "KeyError:",
+        "ValueError:",
+        "ZeroDivisionError:",
+    ];
+    if !markers.iter().any(|m| text.contains(m)) {
+        return;
+    }
+    app.borrow_mut().last_clipboard = signature;
+    std::thread::spawn(move || {
+        let reply = crate::brain::analyze_clipboard(&text);
+        post(move |app| say(app, &reply.text, &reply.emotion, reply.logs.clone(), true));
+    });
+}
+
+pub fn apply_scale(app: &AppHandle, scale: f32) {
+    let scale = scale.clamp(0.5, 2.5);
+    config::update(|s| s.avatar_scale = scale);
+    sync_chrome(app);
+    sync_studio(app);
+}
+pub fn set_peeking(app: &AppHandle, side: &str) {
+    let side = match side {
+        "left" | "right" => side,
+        _ => "none",
+    };
+    app.borrow().ui.set_peeking(side != "none");
+    app.borrow_mut().peeking = side.to_string();
+    app.borrow().stage.borrow_mut().set_peeking(side);
+}
+/// Global hotkeys: Alt+Space summons, Ctrl+Shift+M toggles the mic, Ctrl+Shift+C opens the studio.
+
+fn install_hotkeys() {
+    std::thread::spawn(move || {
+        use global_hotkey::hotkey::HotKey;
+
+        use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+
+        use std::str::FromStr;
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("global hotkeys unavailable: {e}");
+                return;
+            }
+        };
+        let mut registered = [0u32; 3];
+        for (index, combo) in ["Alt+Space", "Control+Shift+M", "Control+Shift+C"]
+            .iter()
+            .enumerate()
+        {
+            match HotKey::from_str(combo) {
+                Ok(hotkey) => {
+                    registered[index] = hotkey.id();
+                    if let Err(e) = manager.register(hotkey) {
+                        log::warn!("hotkey {combo} registration failed: {e}");
+                        registered[index] = 0;
+                    }
+                }
+                Err(e) => log::warn!("hotkey {combo} parse failed: {e}"),
+            }
+        }
+        let receiver = GlobalHotKeyEvent::receiver();
+        while let Ok(event) = receiver.recv() {
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            let action = if event.id == registered[0] && registered[0] != 0 {
+                0
+            } else if event.id == registered[1] && registered[1] != 0 {
+                1
+            } else if event.id == registered[2] && registered[2] != 0 {
+                2
+            } else {
+                continue;
+            };
+            post(move |app| match action {
+                0 => summon(app),
+                1 => toggle_mic(app),
+                _ => open_studio(app),
+            });
+        }
+    });
+}
+
+fn summon(app: &AppHandle) {
+    let _ = app.borrow().ui.window().show();
+    app.borrow().ui.set_bar_visible(true);
+    let pos = app.borrow().pos;
+    let _ = app
+        .borrow()
+        .ui
+        .window()
+        .set_position(PhysicalPosition::new(pos.0, pos.1));
+    sync_chrome(app);
+    app.borrow_mut().bar_pinned_open = true;
+    say(
+        app,
+        &config::flav("You summoned me with Alt+Space. Tell me what you need."),
+        "talking",
+        vec!["summoned via global hotkey".into()],
+        true,
+    );
+}
+pub fn open_studio(app: &AppHandle) {
+    if let Some(studio) = app.borrow().studio.as_ref() {
+        let _ = studio.window().show();
+        sync_studio(app);
+        return;
+    }
+    let studio = match ControlCenter::new() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("control center failed: {e}");
+            return;
+        }
+    };
+    wire_studio(&studio);
+    studio.show().ok();
+    app.borrow_mut().studio = Some(studio);
+    sync_studio(app);
+}
+pub fn open_quick_dial(app: &AppHandle) {
+    if let Some(dial) = app.borrow().dial.as_ref() {
+        let _ = dial.window().show();
+        return;
+    }
+    let dial = match QuickDial::new() {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("quick dial failed: {e}");
+            return;
+        }
+    };
+    wire_dial(&dial);
+    let (cx, cy) = crate::input::cursor_position();
+    let _ = dial
+        .window()
+        .set_position(PhysicalPosition::new(cx - 130, cy - 130));
+    dial.show().ok();
+    app.borrow_mut().dial = Some(dial);
+}
+pub fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
+    if let Some(menu) = app.borrow().menu.as_ref() {
+        let _ = menu.window().show();
+        let _ = menu
+            .window()
+            .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
+        return;
+    }
+    let menu = match ContextMenu::new() {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("context menu failed: {e}");
+            return;
+        }
+    };
+    wire_menu(&menu);
+    let _ = menu
+        .window()
+        .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
+    menu.show().ok();
+    app.borrow_mut().menu = Some(menu);
+    apply_persona(app);
+}
+
+fn hide_window_of<T: ComponentHandle>(weak: &slint::Weak<T>) {
+    if let Some(component) = weak.upgrade() {
+        let _ = component.window().hide();
+    }
+}
+
+fn wire_menu(menu: &ContextMenu) {
+    let weak = menu.as_weak();
+    {
+        let weak = weak.clone();
+        menu.on_summon(move || {
+            hide_window_of(&weak);
+            post(summon);
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_toggle_chatbox(move || {
+            hide_window_of(&weak);
+            post(|app| {
+                let next = !config::get().input_bar_visible;
+                config::update(|s| s.input_bar_visible = next);
+                app.borrow().ui.set_bar_visible(next);
+                app.borrow_mut().bar_pinned_open = next;
+                sync_chrome(app);
+                sync_studio(app);
+            });
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_open_studio(move || {
+            hide_window_of(&weak);
+            post(open_studio);
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_quick_dial(move || {
+            hide_window_of(&weak);
+            post(open_quick_dial);
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_open_vault(move || {
+            hide_window_of(&weak);
+            let facts = crate::memory::facts();
+            let body = if facts.is_empty() {
+                "Aria's Memory Vault is empty. She learns facts from conversation.\n".to_string()
+            } else {
+                let mut lines = vec![
+                    "ARIA ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â MEMORY VAULT".to_string(),
+                    format!("{} remembered facts\n", facts.len()),
+                ];
+                for (i, fact) in facts.iter().enumerate() {
+                    lines.push(format!(
+                        "[{:02}] [{}] {}
+    ({})",
+                        i + 1,
+                        fact.category.to_uppercase(),
+                        fact.fact,
+                        fact.added_at
+                    ));
+                }
+                lines.join("\n")
+            };
+            let path = config::data_dir().join("memory_vault.txt");
+            let _ = std::fs::write(&path, body);
+            let _ = std::process::Command::new("notepad.exe").arg(&path).spawn();
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_set_key(move || {
+            hide_window_of(&weak);
+            post(open_studio);
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_toggle_mic_mode(move || {
+            hide_window_of(&weak);
+            post(|app| {
+                let next = if config::get().mic_mode == "always_open" {
+                    "click"
+                } else {
+                    "always_open"
+                };
+                config::update(|s| s.mic_mode = next.to_string());
+                sync_studio(app);
+            });
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_reset_pose(move || {
+            hide_window_of(&weak);
+            post(reset_pose);
+        });
+    }
+    {
+        let weak = weak.clone();
+        menu.on_open_log(move || {
+            hide_window_of(&weak);
+            crate::logger::open_log_file();
+        });
+    }
+    menu.on_quit(move || {
+        let _ = slint::quit_event_loop();
+        std::process::exit(0);
+    });
+}
+pub fn reset_pose(app: &AppHandle) {
+    {
+        let mut a = app.borrow_mut();
+        a.target = None;
+        a.stationary_since = Instant::now();
+    }
+    app.borrow().stage.borrow_mut().stop_audio();
+    app.borrow()
+        .stage
+        .borrow_mut()
+        .set_state("idle", false, false, false);
+    set_peeking(app, "none");
+    say(
+        app,
+        &config::flav("Back to standing by. What do you need?"),
+        "idle",
+        vec!["avatar reset to idle".into()],
+        false,
+    );
+}
+
+fn wire_dial(dial: &QuickDial) {
+    let weak = dial.as_weak();
+    {
+        let weak = weak.clone();
+        dial.on_headpat(move || {
+            hide_window_of(&weak);
+            post(headpat);
+        });
+    }
+    {
+        let weak = weak.clone();
+        dial.on_coffee(move || {
+            hide_window_of(&weak);
+            post(|app| {
+                submit_prompt(
+                    app,
+                    "Let's take a quick coffee or tea break together!".into(),
+                    false,
+                )
+            });
+        });
+    }
+    {
+        let weak = weak.clone();
+        dial.on_dance(move || {
+    hide_window_of(&weak);
+    post(|app| {
+    let stat = crate::memory::adjust_emotion("hype", 5);
+    crate::memory::adjust_emotion("groove", 3);
+    say(                    app,                    &config::flav("Watch closely ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â spinning right here on your desktop."),                    "dance",                    vec![format!("dance, hype level {}", stat.level)],                    true,                );
+    sync_studio(app);
+    });
+    });
+    }
+    {
+        let weak = weak.clone();
+        dial.on_media(move || {
+            hide_window_of(&weak);
+            post(|app| {
+                submit_prompt(
+                    app,
+                    "play pa
+
+use music"
+                        .into(),
+                    false,
+                )
+            });
+        });
+    }
+    {
+        let weak = weak.clone();
+        dial.on_mic(move || {
+            hide_window_of(&weak);
+            post(toggle_mic);
+        });
+    }
+    {
+        let weak = weak.clone();
+        dial.on_studio(move || {
+            hide_window_of(&weak);
+            post(open_studio);
+        });
+    }
+    dial.on_dismissed(move || {
+        hide_window_of(&weak);
+    });
+}
+pub fn headpat(app: &AppHandle) {
+    crate::mood::note_event("headpat");
+    let stat = crate::memory::adjust_emotion("dere", 5);
+    crate::memory::adjust_emotion("devotion", 2);
+    app.borrow().stage.borrow_mut().trigger_headpat();
+    let line = crate::reactions::pick(&config::current_persona(), "headpat", 0.35);
+    say(
+        app,
+        &line,
+        "happy",
+        vec![format!(
+            "headpat, dere level {} ({})",
+            stat.level, stat.tier
+        )],
+        true,
+    );
+    sync_studio(app);
+}
+pub fn poke(app: &AppHandle) {
+    crate::mood::note_event("poke");
+    let stat = crate::memory::adjust_emotion("tsun", 5);
+    let line = crate::reactions::pick(&config::current_persona(), "poke", 0.32);
+    say(
+        app,
+        &line,
+        "annoyed",
+        vec![format!("poked, tsun level {} ({})", stat.level, stat.tier)],
+        true,
+    );
+    sync_studio(app);
+}
+pub fn shake(app: &AppHandle) {
+    crate::mood::note_event("shake");
+    crate::memory::adjust_emotion("tsun", 4);
+    let stat = crate::memory::adjust_emotion("hype", 3);
+    let line = crate::reactions::pick(&config::current_persona(), "shake", 0.32);
+    say(
+        app,
+        &line,
+        "dizzy",
+        vec![format!("shaken, hype level {}", stat.level)],
+        true,
+    );
+    sync_studio(app);
+}
+
+fn attach_stage(app: &AppHandle) {
+    let stage = app.borrow().stage.clone();
+    let weak = app.borrow().ui.as_weak();
+    slint::spawn_local(async move {
+        let Some(ui) = weak.upgrade() else { return };
+        let window = ui.window();
+        let raw = match window.winit_window().await {
+            Ok(w) => w,
+            Err(e) => {
+                log::error!("no winit window for the avatar stage: {e}");
+                return;
+            }
+        };
+        let scale = window.scale_factor();
+        let rect = crate::stage::StageRect {
+            x: ui.get_stage_x(),
+            y: ui.get_stage_y(),
+            width: ui.get_stage_w(),
+            height: ui.get_stage_h(),
+        };
+        stage.borrow_mut().attach(
+            &*raw,
+            rect,
+            scale,
+            Box::new(|payload| {
+                post(move |app| on_stage_event(app, &payload));
+            }),
+        );
+    })
+    .ok();
+}
+/// Handles one IPC message from the stage page.
+pub fn on_stage_event(app: &AppHandle, payload: &str) {
+    let trimmed = payload.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let (kind, data) = match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) => (
+            value
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or("")
+                .to_string(),
+            value.get("data").cloned().unwrap_or(serde_json::json!({})),
+        ),
+        Err(_) => (trimmed.to_string(), serde_json::json!({})),
+    };
+    match kind.as_str() {
+        "drag_start" => start_drag(app),
+        "drag_move" | "avatar_drag" => {
+            if !app.borrow().dragging {
+                start_drag(app);
+            }
+            let cursor = crate::input::cursor_position();
+            update_drag(app, cursor);
+        }
+        "drag_end" => end_drag(app),
+        "drag_inertia" => {
+            let vx = data.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let vy = data.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            app.borrow().stage.borrow_mut().set_drag_inertia(vx, vy);
+        }
+        "poke" => poke(app),
+        "shake" => shake(app),
+        "headpat" => headpat(app),
+        "middle_click" => open_quick_dial(app),
+        "context_menu" => {
+            let cursor = crate::input::cursor_position();
+            open_context_menu(app, cursor);
+        }
+        "stage_ready" => {
+            log::info!("avatar stage ready");
+            app.borrow().stage.borrow_mut().apply_settings();
+        }
+        "js_error" => {
+            log::error!("stage JS error: {data}");
+        }
+        other => log::debug!("unhandled stage event: {other}"),
+    }
+}
+pub fn start_drag(app: &AppHandle) {
+    let (pos, cursor) = (app.borrow().pos, crate::input::cursor_position());
+    let mut a = app.borrow_mut();
+    a.dragging = true;
+    a.drag_origin = Some((pos.0, pos.1, cursor.0, cursor.1));
+    a.target = None;
+    a.user_placed = true;
+}
+pub fn update_drag(app: &AppHandle, cursor: (i32, i32)) {
+    if let Some((win_x, win_y, cur_x, cur_y)) = app.borrow().drag_origin {
+        set_window_pos(app, win_x + (cursor.0 - cur_x), win_y + (cursor.1 - cur_y));
+    }
+}
+pub fn end_drag(app: &AppHandle) {
+    app.borrow_mut().dragging = false;
+    app.borrow_mut().drag_origin = None;
+    app.borrow_mut().stationary_since = Instant::now();
+    app.borrow().stage.borrow_mut().set_drag_inertia(0.0, 0.0);
+    check_edge_snap(app);
+}
+/// Magnetic bezel snapping with the peeking lean.
+pub fn check_edge_snap(app: &AppHandle) {
+    if !config::get().edge_snapping_enabled {
+        return;
+    }
+    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let (x, y) = app.borrow().pos;
+    let (w, h) = window_size(app);
+
+    const THRESHOLD: i32 = 55;
+    let mut target_x = x;
+    let mut target_y = y;
+    let mut side = "none";
+    if (x - sx).abs() <= THRESHOLD {
+        target_x = sx - (w as f32 * 0.12) as i32;
+        side = "left";
+    } else if ((x + w) - (sx + sw)).abs() <= THRESHOLD {
+        target_x = sx + sw - (w as f32 * 0.88) as i32;
+        side = "right";
+    }
+    if ((y + h) - (sy + sh)).abs() <= THRESHOLD {
+        target_y = sy + sh - h;
+    }
+    if target_x != x || target_y != y {
+        app.borrow_mut().target = Some((target_x, target_y));
+        app.borrow_mut().post_walk_emotion = "idle".into();
+    }
+    set_peeking(app, side);
+}
+pub fn cleanup(app: &AppHandle) {
+    crate::voice::shutdown();
+    crate::discord::close();
+    app.borrow_mut().stage.borrow_mut().shutdown();
+    config::save();
+    log::info!("Aria exited");
+}
+
+mod studio;
+pub use studio::{sync_studio, wire_studio};

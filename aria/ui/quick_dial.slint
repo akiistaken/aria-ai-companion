@@ -1,0 +1,165 @@
+// Radial quick-dial: six actions around the cursor. Opens on middle-click.
+
+import { Theme, Accent, Glyph, Icon } from "tokens.slint";
+
+component DialButton inherits Rectangle {
+    in property <string> icon: "";
+    in property <string> label: "";
+    in property <bool> hot: false;
+    callback activated();
+
+    width: 54px;
+    height: 54px;
+    border-radius: 27px;
+    background: hit.pressed ? Theme.accent : (hit.has-hover ? Theme.surface-raised : Theme.surface);
+    border-width: 1.4px;
+    border-color: hit.has-hover ? Theme.accent : Theme.hairline-strong;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 3px;
+    drop-shadow-color: #00000070;
+
+    Icon {
+        d: root.icon;
+        size: 20px;
+        tint: hit.pressed ? Theme.canvas : (hit.has-hover ? Theme.accent : Theme.text);
+        x: (parent.width - self.width) / 2;
+        y: 13px;
+    }
+    Text {
+        x: 0;
+        y: 34px;
+        width: parent.width;
+        height: 14px;
+        text: root.label;
+        color: hit.has-hover ? Theme.accent : Theme.text-muted;
+        font-size: 8.5px;
+        font-weight: 600;
+        font-family: Theme.font-ui;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    hit := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+export component QuickDial inherits Window {
+    title: "Quick dial";
+    background: transparent;
+    width: 260px;
+    height: 260px;
+
+    in-out property <color> accent-color: #38bdf8;
+    in-out property <color> accent-wash: #12232c;
+    in-out property <color> accent-edge: #1f5f7a;
+
+    callback headpat();
+    callback coffee();
+    callback dance();
+    callback media();
+    callback mic();
+    callback studio();
+    callback dismissed();
+
+    init => {
+        Accent.wash = root.accent-wash;
+        Accent.edge = root.accent-edge;
+        Theme.accent = root.accent-color;
+    }
+    changed accent-color => { Theme.accent = root.accent-color; }
+    changed accent-wash => { Accent.wash = root.accent-wash; }
+    changed accent-edge => { Accent.edge = root.accent-edge; }
+
+    // Ring backdrop: a thin guide circle, no filled disc.
+    Path {
+        width: 220px;
+        height: 220px;
+        viewbox-width: 220;
+        viewbox-height: 220;
+        x: 20px;
+        y: 20px;
+        commands: "M110 2 a108 108 0 1 0 0.01 0";
+        stroke: Accent.edge;
+        stroke-width: 1px;
+        fill: transparent;
+        opacity: 0.55;
+    }
+
+    DialButton {
+        x: 103px;
+        y: 8px;
+        icon: Glyph.heart;
+        label: "PET";
+        activated => { root.headpat(); }
+    }
+    DialButton {
+        x: 186px;
+        y: 68px;
+        icon: Glyph.coffee;
+        label: "BREAK";
+        activated => { root.coffee(); }
+    }
+    DialButton {
+        x: 186px;
+        y: 156px;
+        icon: Glyph.dance;
+        label: "DANCE";
+        activated => { root.dance(); }
+    }
+    DialButton {
+        x: 103px;
+        y: 198px;
+        icon: Glyph.wave;
+        label: "MEDIA";
+        activated => { root.media(); }
+    }
+    DialButton {
+        x: 20px;
+        y: 156px;
+        icon: Glyph.mic;
+        label: "MIC";
+        activated => { root.mic(); }
+    }
+    DialButton {
+        x: 20px;
+        y: 68px;
+        icon: Glyph.sliders;
+        label: "STUDIO";
+        activated => { root.studio(); }
+    }
+
+    // Centre dismiss
+    Rectangle {
+        x: 106px;
+        y: 106px;
+        width: 48px;
+        height: 48px;
+        border-radius: 24px;
+        background: center-hit.has-hover ? Theme.danger : Theme.surface;
+        border-width: 1.2px;
+        border-color: center-hit.has-hover ? Theme.danger : Theme.hairline-strong;
+
+        Icon {
+            d: Glyph.close;
+            size: 16px;
+            tint: center-hit.has-hover ? Theme.canvas : Theme.text-muted;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        center-hit := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.dismissed(); }
+        }
+    }
+
+    // Click outside the ring dismisses.
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        clicked => { root.dismissed(); }
+    }
+}

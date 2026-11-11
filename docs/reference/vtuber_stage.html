@@ -1,0 +1,2064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aria VTuber Stage</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent !important;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #vrm-container, #live2d-container {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent !important;
+  }
+  #live2d-container {
+    display: none;
+  }
+  #spectrum-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 15;
+  }
+  canvas {
+    display: block;
+    background: transparent !important;
+  }
+  #status-pill {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.85);
+    color: #38bdf8;
+    border: 1px solid #38bdf8;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: 'Segoe UI', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    pointer-events: none;
+    display: none;
+    white-space: nowrap;
+    z-index: 20;
+  }
+</style>
+
+<!-- Live2D Cubism 2 & Cubism 4 Runtimes + PixiJS + pixi-live2d-display -->
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
+
+<!-- Three.js + @pixiv/three-vrm Import Map -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.0/lib/three-vrm.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="vrm-container"></div>
+  <div id="live2d-container"></div>
+  <canvas id="spectrum-canvas"></canvas>
+  <div id="status-pill">Loading VTuber Model...</div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+    const vrmContainer = document.getElementById('vrm-container');
+    const live2dContainer = document.getElementById('live2d-container');
+    const spectrumCanvas = document.getElementById('spectrum-canvas');
+    const sCtx = spectrumCanvas ? spectrumCanvas.getContext('2d') : null;
+    const statusPill = document.getElementById('status-pill');
+
+    if (spectrumCanvas) {
+      spectrumCanvas.width = window.innerWidth;
+      spectrumCanvas.height = window.innerHeight;
+    }
+
+    function showStatus(msg, autoHideMs = 0) {
+      if (!msg) {
+        statusPill.style.display = 'none';
+        return;
+      }
+      statusPill.textContent = msg;
+      statusPill.style.display = 'block';
+      if (autoHideMs > 0) {
+        setTimeout(() => { statusPill.style.display = 'none'; }, autoHideMs);
+      }
+    }
+
+    // Shared Avatar State
+    const state = {
+      mode: 'vrm', // 'vrm' | 'live2d' | 'puppet'
+      emotion: 'idle', // 'idle' | 'talking' | 'annoyed' | 'walking'
+      facingRight: false,
+      isMoving: false,
+      isTalking: false,
+      framing: 'half', // 'full' | 'half' | 'face'
+      zoomMultiplier: 1.0,
+      yOffset: 0.0,
+      mouseX: 0.0, // -1 to 1
+      mouseY: 0.0, // -1 to 1
+      smoothMouseX: 0.0,
+      smoothMouseY: 0.0,
+      emotionTriggerTime: 0,
+      blinkTimer: 0,
+      nextBlink: 2.8,
+      props: {
+        cat_ears: false,
+        headset: false,
+        glasses: false,
+        halo: false,
+        angel_wings: false,
+        witch_hat: false,
+        sunglasses: false,
+        devil_horns: false,
+        cyber_sword: false,
+        fox_tail: false,
+        coffee_mug: false,
+        game_controller: false,
+        smartphone: false,
+      },
+      musicPlaying: false,
+      musicEnergy: 0.0,
+      spectrumEnabled: true,
+      renderPaused: false,
+      stageLighting: 'auto',
+      dragInertiaX: 0.0,
+      dragInertiaY: 0.0,
+      targetInertiaX: 0.0,
+      targetInertiaY: 0.0,
+      headpatActive: 0.0,
+      peekingSide: 'none', // 'none' | 'left' | 'right'
+    };
+
+    // =========================================================================
+    // 0. WEB AUDIO API + REAL-TIME FFT VOICE LIP-SYNC ENGINE
+    // =========================================================================
+    let audioCtx = null;
+    let analyser = null;
+    let freqData = null;
+    let activeAudio = null;
+    let isAudioElementPlaying = false;
+
+    function ensureAudioContext() {
+      if (!audioCtx) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioContextClass();
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.65;
+        freqData = new Uint8Array(analyser.frequencyBinCount);
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    window.stopVoiceAudio = function() {
+      if (activeAudio) {
+        try {
+          activeAudio.pause();
+          activeAudio.src = '';
+        } catch (_) {}
+        activeAudio = null;
+      }
+      isAudioElementPlaying = false;
+    };
+
+    window.playVoiceAudio = function(url, muted) {
+      try {
+        window.stopVoiceAudio();
+        ensureAudioContext();
+
+        const audio = new Audio();
+        audio.crossOrigin = 'anonymous';
+        audio.src = url;
+
+        const source = audioCtx.createMediaElementSource(audio);
+        source.connect(analyser);
+        if (!muted) {
+          analyser.connect(audioCtx.destination);
+        }
+
+        audio.onplay = () => { isAudioElementPlaying = true; };
+        audio.onended = () => { isAudioElementPlaying = false; };
+        audio.onerror = () => { isAudioElementPlaying = false; };
+
+        activeAudio = audio;
+        audio.play().catch((err) => {
+          console.error('Audio play error:', err);
+          isAudioElementPlaying = false;
+        });
+      } catch (e) {
+        console.error('playVoiceAudio exception:', e);
+      }
+    };
+
+    // =========================================================================
+    // 1. THREE.JS + @PIXIV/THREE-VRM 3D ENGINE
+    // =========================================================================
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'low-power', precision: 'mediump' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    vrmContainer.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(28.0, window.innerWidth / window.innerHeight, 0.1, 20.0);
+    camera.position.set(0.0, 1.15, 2.35);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.35);
+    scene.add(ambientLight);
+
+    const keyLight = new THREE.DirectionalLight(0xfff7ed, 1.6);
+    keyLight.position.set(1.2, 2.2, 2.5);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.9);
+    rimLight.position.set(-1.5, 1.8, -1.5);
+    scene.add(rimLight);
+
+    const fillLight = new THREE.DirectionalLight(0xf472b6, 0.4);
+    fillLight.position.set(1.5, -0.5, 1.0);
+    scene.add(fillLight);
+
+    function updateStageLightingPreset(preset) {
+      state.stageLighting = preset || 'auto';
+      let mode = state.stageLighting;
+      if (mode === 'auto') {
+        const hr = (new Date()).getHours();
+        if (hr >= 5 && hr < 9) mode = 'dawn';
+        else if (hr >= 9 && hr < 17) mode = 'day';
+        else if (hr >= 17 && hr < 20) mode = 'sunset';
+        else mode = 'night';
+      }
+
+      const presets = {
+        day: {
+          ambCol: 0xffffff, ambInt: 1.35,
+          keyCol: 0xfff7ed, keyInt: 1.6, keyPos: [1.2, 2.2, 2.5],
+          rimCol: 0x38bdf8, rimInt: 0.85,
+          fillCol: 0xf472b6, fillInt: 0.35,
+        },
+        dawn: {
+          ambCol: 0xffe4e6, ambInt: 1.20,
+          keyCol: 0xfef08a, keyInt: 1.45, keyPos: [2.0, 1.4, 2.0],
+          rimCol: 0x38bdf8, rimInt: 0.8,
+          fillCol: 0xf472b6, fillInt: 0.45,
+        },
+        sunset: {
+          ambCol: 0xfce7f3, ambInt: 1.10,
+          keyCol: 0xf97316, keyInt: 1.85, keyPos: [-1.8, 1.2, 1.8],
+          rimCol: 0xa855f7, rimInt: 1.25,
+          fillCol: 0xec4899, fillInt: 0.55,
+        },
+        night: {
+          ambCol: 0x1e1b4b, ambInt: 0.90,
+          keyCol: 0xfef08a, keyInt: 1.35, keyPos: [1.4, 1.8, 1.5],
+          rimCol: 0x00f0ff, rimInt: 1.45,
+          fillCol: 0xec4899, fillInt: 0.65,
+        },
+      };
+
+      const cfg = presets[mode] || presets.day;
+      ambientLight.color.setHex(cfg.ambCol);
+      ambientLight.intensity = cfg.ambInt;
+      keyLight.color.setHex(cfg.keyCol);
+      keyLight.intensity = cfg.keyInt;
+      keyLight.position.set(...cfg.keyPos);
+      rimLight.color.setHex(cfg.rimCol);
+      rimLight.intensity = cfg.rimInt;
+      fillLight.color.setHex(cfg.fillCol);
+      fillLight.intensity = cfg.fillInt;
+    }
+    window.setStageLightingPreset = updateStageLightingPreset;
+
+    const lookAtTarget = new THREE.Object3D();
+    lookAtTarget.position.set(0, 1.25, 2.0);
+    camera.add(lookAtTarget);
+    scene.add(camera);
+
+    let currentVrm = null;
+    let propMeshes = {
+      cat_ears: null,
+      headset: null,
+      glasses: null,
+      halo: null,
+      angel_wings: null,
+      witch_hat: null,
+      sunglasses: null,
+      devil_horns: null,
+      cyber_sword: null,
+      fox_tail: null,
+      coffee_mug: null,
+      game_controller: null,
+      smartphone: null,
+    };
+
+    // VRM Hand Rigging joint cache
+    let vrmHandBones = {
+      leftHand: null,
+      rightHand: null,
+      leftFingers: {},
+      rightFingers: {},
+    };
+
+    function cacheVRMHandBones(vrm) {
+      vrmHandBones = { leftHand: null, rightHand: null, leftFingers: {}, rightFingers: {} };
+      if (!vrm || !vrm.humanoid) return;
+      const hum = vrm.humanoid;
+      vrmHandBones.leftHand = hum.getNormalizedBoneNode('leftHand');
+      vrmHandBones.rightHand = hum.getNormalizedBoneNode('rightHand');
+
+      const fingerJointNames = {
+        thumb: ['Metacarpal', 'Proximal', 'Distal'],
+        index: ['Proximal', 'Intermediate', 'Distal'],
+        middle: ['Proximal', 'Intermediate', 'Distal'],
+        ring: ['Proximal', 'Intermediate', 'Distal'],
+        little: ['Proximal', 'Intermediate', 'Distal'],
+      };
+
+      for (const side of ['left', 'right']) {
+        const targetMap = side === 'left' ? vrmHandBones.leftFingers : vrmHandBones.rightFingers;
+        for (const [fName, joints] of Object.entries(fingerJointNames)) {
+          targetMap[fName] = [];
+          for (const joint of joints) {
+            const boneName = side + fName.charAt(0).toUpperCase() + fName.slice(1) + joint;
+            const node = hum.getNormalizedBoneNode(boneName);
+            if (node) {
+              targetMap[fName].push(node);
+            }
+          }
+        }
+      }
+    }
+
+    function applyHandPosing(side, curlAmt, spread, wristX, wristY, wristZ) {
+      const isLeft = side === 'left';
+      const sign = isLeft ? 1.0 : -1.0;
+      const handNode = isLeft ? vrmHandBones.leftHand : vrmHandBones.rightHand;
+      if (handNode) {
+        handNode.rotation.set(wristX, wristY, wristZ);
+      }
+      const fingers = isLeft ? vrmHandBones.leftFingers : vrmHandBones.rightFingers;
+      if (!fingers) return;
+
+      const fWeights = {
+        index: 0.90,
+        middle: 1.0,
+        ring: 1.05,
+        little: 1.10,
+      };
+
+      for (const [fName, nodes] of Object.entries(fingers)) {
+        if (!nodes || nodes.length === 0) continue;
+        if (fName === 'thumb') {
+          const tCurl = curlAmt * 0.45;
+          if (nodes[0]) nodes[0].rotation.set(0, sign * 0.12, sign * (tCurl * 0.25));
+          if (nodes[1]) nodes[1].rotation.set(0, 0, sign * (tCurl * 0.45));
+          if (nodes[2]) nodes[2].rotation.set(0, 0, sign * (tCurl * 0.35));
+        } else {
+          const weight = fWeights[fName] || 1.0;
+          const baseCurl = curlAmt * weight;
+          const spreadY = (fName === 'index' ? 0.06 : (fName === 'ring' ? -0.04 : (fName === 'little' ? -0.08 : 0))) * spread;
+          if (nodes[0]) nodes[0].rotation.set(0, sign * spreadY, sign * (baseCurl * 0.38));
+          if (nodes[1]) nodes[1].rotation.set(0, 0, sign * (baseCurl * 0.42));
+          if (nodes[2]) nodes[2].rotation.set(0, 0, sign * (baseCurl * 0.25));
+        }
+      }
+    }
+
+    const gltfLoader = new GLTFLoader();
+    gltfLoader.register((parser) => new VRMLoaderPlugin(parser));
+
+    function attachWardrobePropsToVRM(vrm) {
+      propMeshes = {
+        cat_ears: null,
+        headset: null,
+        glasses: null,
+        halo: null,
+        angel_wings: null,
+        witch_hat: null,
+        sunglasses: null,
+        devil_horns: null,
+        cyber_sword: null,
+        fox_tail: null,
+        coffee_mug: null,
+        game_controller: null,
+        smartphone: null,
+      };
+      if (!vrm || !vrm.humanoid) return;
+      const headNode = vrm.humanoid.getNormalizedBoneNode('head');
+      const chestNode = vrm.humanoid.getNormalizedBoneNode('upperChest') || vrm.humanoid.getNormalizedBoneNode('chest') || vrm.humanoid.getNormalizedBoneNode('spine');
+      const hipsNode = vrm.humanoid.getNormalizedBoneNode('hips');
+      const rHandNode = vrm.humanoid.getNormalizedBoneNode('rightHand');
+      const lHandNode = vrm.humanoid.getNormalizedBoneNode('leftHand');
+
+      if (headNode) {
+        // 1. 🐱 Neon Cyber Cat Ears
+        const earsGroup = new THREE.Group();
+        const outerEarMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4, metalness: 0.3 });
+        const innerEarMat = new THREE.MeshStandardMaterial({ color: 0xf472b6, emissive: 0xdb2777, emissiveIntensity: 0.6 });
+        const earGeo = new THREE.ConeGeometry(0.048, 0.105, 4);
+        const innerGeo = new THREE.ConeGeometry(0.028, 0.075, 4);
+
+        const leftEar = new THREE.Mesh(earGeo, outerEarMat);
+        leftEar.position.set(0.085, 0.195, 0.01);
+        leftEar.rotation.set(0.1, 0.25, -0.32);
+        const leftInner = new THREE.Mesh(innerGeo, innerEarMat);
+        leftInner.position.set(0, -0.005, 0.014);
+        leftEar.add(leftInner);
+
+        const rightEar = new THREE.Mesh(earGeo, outerEarMat);
+        rightEar.position.set(-0.085, 0.195, 0.01);
+        rightEar.rotation.set(0.1, -0.25, 0.32);
+        const rightInner = new THREE.Mesh(innerGeo, innerEarMat);
+        rightInner.position.set(0, -0.005, 0.014);
+        rightEar.add(rightInner);
+
+        earsGroup.add(leftEar, rightEar);
+        earsGroup.visible = !!state.props.cat_ears;
+        headNode.add(earsGroup);
+        propMeshes.cat_ears = earsGroup;
+
+        // 2. 🎧 RGB Gaming Headset
+        const hsGroup = new THREE.Group();
+        const bandMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.3, metalness: 0.6 });
+        const glowMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 0.9 });
+        const bandGeo = new THREE.TorusGeometry(0.118, 0.012, 10, 28, Math.PI);
+        const band = new THREE.Mesh(bandGeo, bandMat);
+        band.position.set(0, 0.085, 0.0);
+        hsGroup.add(band);
+
+        const cupGeo = new THREE.CylinderGeometry(0.042, 0.042, 0.028, 20);
+        const ringGeo = new THREE.TorusGeometry(0.036, 0.005, 8, 20);
+        for (const side of [-1, 1]) {
+          const cup = new THREE.Mesh(cupGeo, bandMat);
+          cup.rotation.z = Math.PI * 0.5;
+          cup.position.set(side * 0.115, 0.065, 0.005);
+          const ring = new THREE.Mesh(ringGeo, glowMat);
+          ring.rotation.y = Math.PI * 0.5;
+          ring.position.set(side * 0.130, 0.065, 0.005);
+          hsGroup.add(cup, ring);
+        }
+        hsGroup.visible = !!state.props.headset;
+        headNode.add(hsGroup);
+        propMeshes.headset = hsGroup;
+
+        // 3. 👓 Anime Glasses
+        const glGroup = new THREE.Group();
+        const frameMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, metalness: 0.8, roughness: 0.2 });
+        const lensGeo = new THREE.TorusGeometry(0.028, 0.0032, 8, 24);
+        const lFrame = new THREE.Mesh(lensGeo, frameMat);
+        lFrame.position.set(0.038, 0.072, 0.098);
+        lFrame.scale.set(1.2, 0.85, 1.0);
+        const rFrame = new THREE.Mesh(lensGeo, frameMat);
+        rFrame.position.set(-0.038, 0.072, 0.098);
+        rFrame.scale.set(1.2, 0.85, 1.0);
+        const bridgeGeo = new THREE.CylinderGeometry(0.0025, 0.0025, 0.022, 8);
+        const bridge = new THREE.Mesh(bridgeGeo, frameMat);
+        bridge.rotation.z = Math.PI * 0.5;
+        bridge.position.set(0, 0.074, 0.099);
+        glGroup.add(lFrame, rFrame, bridge);
+        glGroup.visible = !!state.props.glasses;
+        headNode.add(glGroup);
+        propMeshes.glasses = glGroup;
+
+        // 4. ✨ Glowing Angel/Cyber Halo
+        const haloGeo = new THREE.TorusGeometry(0.11, 0.008, 12, 36);
+        const haloMat = new THREE.MeshStandardMaterial({
+          color: 0xfef08a,
+          emissive: 0x38bdf8,
+          emissiveIntensity: 1.1,
+          roughness: 0.1,
+        });
+        const haloMesh = new THREE.Mesh(haloGeo, haloMat);
+        haloMesh.rotation.x = Math.PI * 0.46;
+        haloMesh.position.set(0, 0.26, -0.01);
+        haloMesh.visible = !!state.props.halo;
+        headNode.add(haloMesh);
+        propMeshes.halo = haloMesh;
+
+        // 5. 🧙‍♀️ Magical Witch Hat
+        const hatGroup = new THREE.Group();
+        const hatMat = new THREE.MeshStandardMaterial({ color: 0x1e1b4b, roughness: 0.6, metalness: 0.2 });
+        const brimGeo = new THREE.CylinderGeometry(0.185, 0.19, 0.007, 32);
+        const brim = new THREE.Mesh(brimGeo, hatMat);
+
+        const coneBaseGeo = new THREE.ConeGeometry(0.115, 0.14, 24);
+        const coneBase = new THREE.Mesh(coneBaseGeo, hatMat);
+        coneBase.position.set(0, 0.07, 0);
+
+        const coneTipGeo = new THREE.ConeGeometry(0.065, 0.13, 20);
+        const coneTip = new THREE.Mesh(coneTipGeo, hatMat);
+        coneTip.position.set(0, 0.18, -0.025);
+        coneTip.rotation.x = -0.35;
+
+        const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xd97706, emissiveIntensity: 0.5 });
+        const ribbonGeo = new THREE.TorusGeometry(0.105, 0.009, 8, 30);
+        const ribbon = new THREE.Mesh(ribbonGeo, ribbonMat);
+        ribbon.rotation.x = Math.PI * 0.5;
+        ribbon.position.set(0, 0.012, 0);
+
+        hatGroup.add(brim, coneBase, coneTip, ribbon);
+        hatGroup.position.set(0, 0.18, 0.01);
+        hatGroup.rotation.set(-0.12, 0, -0.06);
+        hatGroup.visible = !!state.props.witch_hat;
+        headNode.add(hatGroup);
+        propMeshes.witch_hat = hatGroup;
+
+        // 6. 🕶️ Cyberpunk Shades
+        const shadeGroup = new THREE.Group();
+        const shadeMat = new THREE.MeshStandardMaterial({ color: 0x020617, roughness: 0.1, metalness: 0.95 });
+        const neonRimMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 1.2 });
+        const lensGeoS = new THREE.BoxGeometry(0.045, 0.025, 0.004);
+        const lShade = new THREE.Mesh(lensGeoS, shadeMat);
+        lShade.position.set(0.036, 0.070, 0.104);
+        lShade.rotation.y = 0.08;
+        const rShade = new THREE.Mesh(lensGeoS, shadeMat);
+        rShade.position.set(-0.036, 0.070, 0.104);
+        rShade.rotation.y = -0.08;
+        const topBarGeo = new THREE.BoxGeometry(0.098, 0.0035, 0.005);
+        const topBar = new THREE.Mesh(topBarGeo, neonRimMat);
+        topBar.position.set(0, 0.083, 0.105);
+        shadeGroup.add(lShade, rShade, topBar);
+        shadeGroup.visible = !!state.props.sunglasses;
+        headNode.add(shadeGroup);
+        propMeshes.sunglasses = shadeGroup;
+
+        // 7. 😈 Neon Devil Horns
+        const hornGroup = new THREE.Group();
+        const hornMat = new THREE.MeshStandardMaterial({
+          color: 0x1e1b4b,
+          emissive: 0xf43f5e,
+          emissiveIntensity: 0.75,
+          roughness: 0.3,
+          metalness: 0.5,
+        });
+        const hornTipMat = new THREE.MeshStandardMaterial({
+          color: 0xf43f5e,
+          emissive: 0xe11d48,
+          emissiveIntensity: 1.2,
+          roughness: 0.1,
+        });
+        const hornBaseGeo = new THREE.ConeGeometry(0.024, 0.065, 12);
+        const hornTipGeo = new THREE.ConeGeometry(0.015, 0.045, 12);
+
+        const lHorn = new THREE.Mesh(hornBaseGeo, hornMat);
+        lHorn.position.set(0.085, 0.18, 0.02);
+        lHorn.rotation.set(0.2, 0.35, -0.42);
+        const lHornTip = new THREE.Mesh(hornTipGeo, hornTipMat);
+        lHornTip.position.set(0, 0.045, 0.008);
+        lHornTip.rotation.x = -0.25;
+        lHorn.add(lHornTip);
+
+        const rHorn = new THREE.Mesh(hornBaseGeo, hornMat);
+        rHorn.position.set(-0.085, 0.18, 0.02);
+        rHorn.rotation.set(0.2, -0.35, 0.42);
+        const rHornTip = new THREE.Mesh(hornTipGeo, hornTipMat);
+        rHornTip.position.set(0, 0.045, 0.008);
+        rHornTip.rotation.x = -0.25;
+        rHorn.add(rHornTip);
+
+        hornGroup.add(lHorn, rHorn);
+        hornGroup.visible = !!state.props.devil_horns;
+        headNode.add(hornGroup);
+        propMeshes.devil_horns = hornGroup;
+      }
+
+      if (chestNode) {
+        // 8. 🪽 Seraphic Angel Wings (Flapping & Hovering Physics)
+        const wingsGroup = new THREE.Group();
+        const wingMat = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          emissive: 0x38bdf8,
+          emissiveIntensity: 0.65,
+          roughness: 0.25,
+          metalness: 0.12,
+          transparent: true,
+          opacity: 0.94,
+        });
+        const wingBoneMat = new THREE.MeshStandardMaterial({
+          color: 0xbae6fd,
+          emissive: 0x0284c7,
+          emissiveIntensity: 0.95,
+          roughness: 0.15,
+        });
+
+        const leftWing = new THREE.Group();
+        leftWing.position.set(0.045, 0.08, -0.085);
+        const rightWing = new THREE.Group();
+        rightWing.position.set(-0.045, 0.08, -0.085);
+
+        // Wing Bone Arch
+        const boneArchGeo = new THREE.CylinderGeometry(0.009, 0.014, 0.24, 8);
+        const lArch = new THREE.Mesh(boneArchGeo, wingBoneMat);
+        lArch.position.set(0.09, 0.06, 0);
+        lArch.rotation.set(0.2, 0.2, -0.95);
+        leftWing.add(lArch);
+
+        const rArch = new THREE.Mesh(boneArchGeo, wingBoneMat);
+        rArch.position.set(-0.09, 0.06, 0);
+        rArch.rotation.set(0.2, -0.2, 0.95);
+        rightWing.add(rArch);
+
+        // Layered Feathers (5 primary feathers per wing)
+        for (let i = 0; i < 5; i++) {
+          const fLen = 0.24 - i * 0.032;
+          const fGeo = new THREE.ConeGeometry(0.022, fLen, 5);
+          fGeo.scale(1.0, 1.0, 0.28);
+
+          const lFeather = new THREE.Mesh(fGeo, wingMat);
+          lFeather.position.set(0.055 + i * 0.038, -i * 0.032, -0.012);
+          lFeather.rotation.set(-0.1, 0.18, -0.62 - i * 0.22);
+          leftWing.add(lFeather);
+
+          const rFeather = new THREE.Mesh(fGeo, wingMat);
+          rFeather.position.set(-0.055 - i * 0.038, -i * 0.032, -0.012);
+          rFeather.rotation.set(-0.1, -0.18, 0.62 + i * 0.22);
+          rightWing.add(rFeather);
+        }
+
+        wingsGroup.add(leftWing, rightWing);
+        wingsGroup.userData = { leftWing, rightWing };
+        wingsGroup.visible = !!state.props.angel_wings;
+        chestNode.add(wingsGroup);
+        propMeshes.angel_wings = wingsGroup;
+
+        // 9. ⚔️ Cyber Blade / Katana on Back
+        const swordGroup = new THREE.Group();
+        const scabbardMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.3, metalness: 0.7 });
+        const bladeGlowMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 1.2 });
+        const goldMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.2, metalness: 0.8 });
+
+        const scabbardGeo = new THREE.BoxGeometry(0.018, 0.62, 0.034);
+        const scabbard = new THREE.Mesh(scabbardGeo, scabbardMat);
+
+        const edgeLineGeo = new THREE.BoxGeometry(0.004, 0.61, 0.008);
+        const edgeLine = new THREE.Mesh(edgeLineGeo, bladeGlowMat);
+        edgeLine.position.set(0.008, 0, 0.014);
+        scabbard.add(edgeLine);
+
+        const tsubaGeo = new THREE.CylinderGeometry(0.032, 0.032, 0.008, 8);
+        const tsuba = new THREE.Mesh(tsubaGeo, goldMat);
+        tsuba.position.set(0, 0.315, 0);
+        scabbard.add(tsuba);
+
+        const tsukaGeo = new THREE.CylinderGeometry(0.013, 0.015, 0.17, 10);
+        const tsuka = new THREE.Mesh(tsukaGeo, scabbardMat);
+        tsuka.position.set(0, 0.405, 0);
+        scabbard.add(tsuka);
+
+        const pommelGeo = new THREE.SphereGeometry(0.016, 10, 10);
+        const pommel = new THREE.Mesh(pommelGeo, goldMat);
+        pommel.position.set(0, 0.495, 0);
+        scabbard.add(pommel);
+
+        swordGroup.add(scabbard);
+        swordGroup.position.set(0.04, 0.03, -0.11);
+        swordGroup.rotation.set(0.15, 0.18, 0.72);
+        swordGroup.visible = !!state.props.cyber_sword;
+        chestNode.add(swordGroup);
+        propMeshes.cyber_sword = swordGroup;
+      }
+
+      if (hipsNode) {
+        // 10. 🦊 Kitsune Fox Tail
+        const tailGroup = new THREE.Group();
+        const furMat = new THREE.MeshStandardMaterial({
+          color: 0xf8fafc,
+          emissive: 0xf472b6,
+          emissiveIntensity: 0.25,
+          roughness: 0.8,
+        });
+        const furTipMat = new THREE.MeshStandardMaterial({
+          color: 0xffffff,
+          emissive: 0x38bdf8,
+          emissiveIntensity: 0.5,
+          roughness: 0.6,
+        });
+
+        const seg1Geo = new THREE.CylinderGeometry(0.028, 0.018, 0.14, 12);
+        const seg1 = new THREE.Mesh(seg1Geo, furMat);
+        seg1.position.set(0, -0.07, -0.05);
+        seg1.rotation.x = -0.75;
+
+        const seg2Geo = new THREE.ConeGeometry(0.052, 0.18, 14);
+        const seg2 = new THREE.Mesh(seg2Geo, furMat);
+        seg2.position.set(0, -0.17, -0.14);
+        seg2.rotation.x = -1.45;
+
+        const tipGeo = new THREE.ConeGeometry(0.036, 0.14, 12);
+        const tip = new THREE.Mesh(tipGeo, furTipMat);
+        tip.position.set(0, -0.12, -0.27);
+        tip.rotation.x = -2.1;
+
+        tailGroup.add(seg1, seg2, tip);
+        tailGroup.position.set(0, -0.06, -0.08);
+        tailGroup.visible = !!state.props.fox_tail;
+        hipsNode.add(tailGroup);
+        propMeshes.fox_tail = tailGroup;
+      }
+
+      if (rHandNode) {
+        // 11. ☕ Steaming Coffee / Boba Mug (Rigged to Right Hand)
+        const mugGroup = new THREE.Group();
+        const mugMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.2, metalness: 0.1 });
+        const coffeeMat = new THREE.MeshStandardMaterial({ color: 0x3e2723, roughness: 0.4 });
+        const mugGeo = new THREE.CylinderGeometry(0.024, 0.022, 0.054, 16);
+        const mugMesh = new THREE.Mesh(mugGeo, mugMat);
+        const liquidGeo = new THREE.CylinderGeometry(0.021, 0.021, 0.005, 16);
+        const liquid = new THREE.Mesh(liquidGeo, coffeeMat);
+        liquid.position.set(0, 0.023, 0);
+        const handleGeo = new THREE.TorusGeometry(0.016, 0.004, 8, 16, Math.PI);
+        const handle = new THREE.Mesh(handleGeo, mugMat);
+        handle.rotation.z = Math.PI * 0.5;
+        handle.position.set(0.026, 0, 0);
+        mugGroup.add(mugMesh, liquid, handle);
+        mugGroup.position.set(0.035, 0.035, 0.025);
+        mugGroup.rotation.set(0.2, 0, -0.4);
+        mugGroup.visible = !!state.props.coffee_mug;
+        rHandNode.add(mugGroup);
+        propMeshes.coffee_mug = mugGroup;
+
+        // 12. 🎮 Cyber Gamepad / Controller (Rigged to Right Hand)
+        const padGroup = new THREE.Group();
+        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.35, metalness: 0.7 });
+        const glowLedMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, emissiveIntensity: 1.2 });
+        const btnMat = new THREE.MeshStandardMaterial({ color: 0xf43f5e, emissive: 0xe11d48, emissiveIntensity: 0.8 });
+        const padBodyGeo = new THREE.BoxGeometry(0.075, 0.038, 0.016);
+        const padBody = new THREE.Mesh(padBodyGeo, bodyMat);
+        const stickGeo = new THREE.CylinderGeometry(0.007, 0.007, 0.008, 10);
+        const lStick = new THREE.Mesh(stickGeo, glowLedMat);
+        lStick.position.set(-0.02, 0.008, 0.008);
+        const rStick = new THREE.Mesh(stickGeo, glowLedMat);
+        rStick.position.set(0.012, -0.004, 0.008);
+        const btn1 = new THREE.Mesh(stickGeo, btnMat);
+        btn1.position.set(0.022, 0.006, 0.008);
+        padGroup.add(padBody, lStick, rStick, btn1);
+        padGroup.position.set(0.045, 0.045, 0.035);
+        padGroup.rotation.set(0.4, 0.2, -0.3);
+        padGroup.visible = !!state.props.game_controller;
+        rHandNode.add(padGroup);
+        propMeshes.game_controller = padGroup;
+      }
+
+      if (lHandNode) {
+        // 13. 📱 Cyber Smartphone (Rigged to Left Hand)
+        const phoneGroup = new THREE.Group();
+        const chassisMat = new THREE.MeshStandardMaterial({ color: 0x020617, roughness: 0.2, metalness: 0.9 });
+        const screenMat = new THREE.MeshStandardMaterial({
+          color: 0x38bdf8,
+          emissive: 0x0284c7,
+          emissiveIntensity: 0.95,
+          roughness: 0.1,
+        });
+        const chassisGeo = new THREE.BoxGeometry(0.038, 0.072, 0.0045);
+        const chassis = new THREE.Mesh(chassisGeo, chassisMat);
+        const screenGeo = new THREE.BoxGeometry(0.034, 0.066, 0.001);
+        const screen = new THREE.Mesh(screenGeo, screenMat);
+        screen.position.set(0, 0, 0.0028);
+        phoneGroup.add(chassis, screen);
+        phoneGroup.position.set(-0.035, 0.035, 0.03);
+        phoneGroup.rotation.set(0.4, -0.3, 0.5);
+        phoneGroup.visible = !!state.props.smartphone;
+        lHandNode.add(phoneGroup);
+        propMeshes.smartphone = phoneGroup;
+      }
+    }
+
+    const attachHeadPropsToVRM = attachWardrobePropsToVRM;
+
+    window.setAvatarProps = function(propsObj) {
+      if (!propsObj || typeof propsObj !== 'object') return;
+      Object.assign(state.props, propsObj);
+      for (const k of ['cat_ears', 'headset', 'glasses', 'halo', 'angel_wings', 'witch_hat', 'sunglasses', 'devil_horns', 'cyber_sword', 'fox_tail', 'coffee_mug', 'game_controller', 'smartphone']) {
+        if (propMeshes[k]) {
+          propMeshes[k].visible = !!state.props[k];
+        }
+      }
+    };
+
+    function setExpressionSafe(expManager, names, val) {
+      if (!expManager) return;
+      for (const name of names) {
+        try {
+          expManager.setValue(name, val);
+        } catch (_) {}
+      }
+    }
+
+    const vrmMetrics = {
+      center: new THREE.Vector3(0, 0.8, 0),
+      height: 1.5,
+    };
+
+    function applyVRMCameraFraming() {
+      if (!currentVrm) return;
+      const height = vrmMetrics.height;
+      const center = vrmMetrics.center;
+      const framing = state.framing || 'half';
+      const zoom = (typeof state.zoomMultiplier === 'number' && !isNaN(state.zoomMultiplier)) ? state.zoomMultiplier : 1.0;
+      const yOff = (typeof state.yOffset === 'number' && !isNaN(state.yOffset)) ? state.yOffset : 0.0;
+
+      let targetY = center.y + height * 0.12;
+      let dist = height * 1.55;
+
+      if (framing === 'full') {
+        // Full body: complete head-to-toe framing with nice margins
+        targetY = center.y - height * 0.02;
+        dist = height * 2.38;
+      } else if (framing === 'half') {
+        // Half body: waist/torso to head (default)
+        targetY = center.y + height * 0.12;
+        dist = height * 1.55;
+      } else if (framing === 'face') {
+        // Face / portrait: neck and facial close-up
+        targetY = center.y + height * 0.38;
+        dist = height * 0.78;
+      }
+
+      dist *= zoom;
+      targetY += yOff * height;
+
+      camera.position.set(0, targetY, dist);
+      camera.lookAt(0, targetY, 0);
+      lookAtTarget.position.set(0, 0, -1.0);
+    }
+
+    async function loadVRMModel(url) {
+      showStatus('⚡ Loading 3D VRM Avatar...');
+      return new Promise((resolve) => {
+        gltfLoader.load(
+          url,
+          (gltf) => {
+            const vrm = gltf.userData.vrm;
+            if (!vrm) {
+              showStatus('⚠️ Invalid VRM file', 3000);
+              resolve(false);
+              return;
+            }
+
+            if (currentVrm) {
+              scene.remove(currentVrm.scene);
+              VRMUtils.deepDispose(currentVrm.scene);
+            }
+
+            VRMUtils.removeUnnecessaryVertices(gltf.scene);
+            VRMUtils.removeUnnecessaryJoints(gltf.scene);
+            VRMUtils.rotateVRM0(vrm);
+
+            vrm.scene.traverse((obj) => {
+              obj.frustumCulled = false;
+            });
+
+            scene.add(vrm.scene);
+            currentVrm = vrm;
+
+            if (vrm.lookAt) {
+              vrm.lookAt.target = lookAtTarget;
+            }
+            attachWardrobePropsToVRM(vrm);
+            cacheVRMHandBones(vrm);
+
+            const box = new THREE.Box3().setFromObject(vrm.scene);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            box.getSize(size);
+            box.getCenter(center);
+
+            vrmMetrics.center.copy(center);
+            vrmMetrics.height = Math.max(size.y, 0.8);
+            applyVRMCameraFraming();
+
+            showStatus('', 0);
+            resolve(true);
+          },
+          undefined,
+          (err) => {
+            console.error('VRM Load Error:', err);
+            showStatus('⚠️ Failed to load VRM', 3500);
+            resolve(false);
+          }
+        );
+      });
+    }
+
+    // =========================================================================
+    // 2. PIXI.JS + LIVE2D CUBISM ENGINE (.model3.json & .model.json)
+    // =========================================================================
+    let pixiApp = null;
+    let currentLive2D = null;
+
+    function ensurePixiApp() {
+      if (pixiApp) return pixiApp;
+      pixiApp = new PIXI.Application({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        backgroundAlpha: 0,
+        transparent: true,
+        antialias: true,
+        autoDensity: true,
+        resolution: Math.min(window.devicePixelRatio, 2),
+      });
+      live2dContainer.appendChild(pixiApp.view);
+      return pixiApp;
+    }
+
+    function fitLive2DModel(model) {
+      if (!model || !pixiApp) return;
+      const w = pixiApp.screen.width;
+      const h = pixiApp.screen.height;
+      model.scale.set(1);
+      const mw = Math.max(model.width, 1);
+      const mh = Math.max(model.height, 1);
+      const baseScale = Math.min((w * 0.92) / mw, (h * 0.94) / mh);
+
+      const framing = state.framing || 'half';
+      let scaleMult = 1.0;
+      let yShift = 0.52;
+      if (framing === 'full') {
+        scaleMult = 0.92;
+        yShift = 0.50;
+      } else if (framing === 'half') {
+        scaleMult = 1.55;
+        yShift = 0.76;
+      } else if (framing === 'face') {
+        scaleMult = 2.45;
+        yShift = 1.15;
+      }
+      const zoom = (typeof state.zoomMultiplier === 'number' && !isNaN(state.zoomMultiplier)) ? state.zoomMultiplier : 1.0;
+      const yOff = (typeof state.yOffset === 'number' && !isNaN(state.yOffset)) ? state.yOffset : 0.0;
+      scaleMult /= Math.max(0.2, zoom);
+      yShift += yOff;
+
+      model.scale.set(baseScale * scaleMult);
+      model.anchor.set(0.5, 0.5);
+      model.x = w * 0.5;
+      model.y = h * yShift;
+    }
+
+    async function loadLive2DModel(url) {
+      showStatus('✨ Loading Live2D Model...');
+      try {
+        const app = ensurePixiApp();
+        if (currentLive2D) {
+          app.stage.removeChild(currentLive2D);
+          currentLive2D.destroy();
+          currentLive2D = null;
+        }
+        const model = await PIXI.live2d.Live2DModel.from(url, { autoInteract: false });
+        currentLive2D = model;
+        app.stage.addChild(model);
+        fitLive2DModel(model);
+        showStatus('', 0);
+        return true;
+      } catch (err) {
+        console.error('Live2D Load Error:', err);
+        showStatus('⚠️ Failed to load Live2D model', 3500);
+        return false;
+      }
+    }
+
+    // =========================================================================
+    // 2b. LIVE PUPPET ENGINE — turns ANY single artwork (.png) into a Live2D-style
+    //     mesh-deformed avatar: breathing, hair/cloth sway, head & eye tracking,
+    //     blinking, emotion poses and real-time voice lip-sync.
+    // =========================================================================
+    let puppet = null;
+
+    // Landmarks as fractions of the image (x, y). Per-image overrides live in <image>.puppet.json
+    const PUPPET_DEFAULT_CFG = {
+      eyeL: [0.42, 0.17],
+      eyeR: [0.60, 0.17],
+      eyeRx: 0.050,
+      eyeRy: 0.016,
+      mouth: [0.52, 0.22],
+      mouthW: 0.055,
+      mouthH: 0.014,
+      neck: [0.52, 0.27],
+      hairEdge: 0.16,
+    };
+
+    const sstep = (a, b, x) => {
+      const k = Math.min(1, Math.max(0, (x - a) / (b - a)));
+      return k * k * (3 - 2 * k);
+    };
+
+    function buildAxis(n, denseRanges) {
+      const set = new Set();
+      for (let i = 0; i <= n; i++) set.add(Math.round((i / n) * 10000) / 10000);
+      for (const [lo, hi, step] of denseRanges) {
+        for (let v = lo; v <= hi + 1e-6; v += step) {
+          if (v >= 0 && v <= 1) set.add(Math.round(v * 10000) / 10000);
+        }
+      }
+      return [...set].sort((a, b) => a - b);
+    }
+
+    function clearPuppet() {
+      if (!puppet) return;
+      try {
+        if (pixiApp) pixiApp.stage.removeChild(puppet.root);
+        puppet.root.destroy({ children: true });
+      } catch (_) {}
+      puppet = null;
+    }
+
+    function fitPuppet() {
+      if (!puppet || !pixiApp) return;
+      const w = pixiApp.screen.width;
+      const h = pixiApp.screen.height;
+      const baseFit = Math.min((w * 0.97) / puppet.W, (h * 0.98) / puppet.H);
+
+      const framing = state.framing || 'half';
+      let scaleMult = 1.0;
+      let yShift = 0.50;
+      if (framing === 'full') {
+        scaleMult = 0.98;
+        yShift = 0.50;
+      } else if (framing === 'half') {
+        scaleMult = 1.50;
+        yShift = 0.72;
+      } else if (framing === 'face') {
+        scaleMult = 2.40;
+        yShift = 1.10;
+      }
+      const zoom = (typeof state.zoomMultiplier === 'number' && !isNaN(state.zoomMultiplier)) ? state.zoomMultiplier : 1.0;
+      const yOff = (typeof state.yOffset === 'number' && !isNaN(state.yOffset)) ? state.yOffset : 0.0;
+      scaleMult /= Math.max(0.2, zoom);
+      yShift += yOff;
+
+      puppet.fit = baseFit * scaleMult;
+      puppet.baseY = h * yShift;
+      puppet.root.scale.set(puppet.fit);
+      puppet.root.position.set(w * 0.5, puppet.baseY);
+    }
+
+    async function loadPuppet(url) {
+      showStatus('🧙 Building live puppet...');
+      try {
+        const app = ensurePixiApp();
+        clearPuppet();
+
+        let cfg = { ...PUPPET_DEFAULT_CFG };
+        try {
+          const cfgUrl = url.replace(/\.(png|jpg|jpeg|webp)(\?.*)?$/i, '.puppet.json');
+          const r = await fetch(cfgUrl);
+          if (r.ok) cfg = { ...cfg, ...(await r.json()) };
+        } catch (_) {}
+
+        const tex = PIXI.Texture.from(url);
+        if (!tex.baseTexture.valid) {
+          await new Promise((res, rej) => {
+            tex.baseTexture.once('loaded', res);
+            tex.baseTexture.once('error', rej);
+          });
+        }
+        const W = tex.width;
+        const H = tex.height;
+
+        const eyeYs = [cfg.eyeL[1], cfg.eyeR[1]];
+        const xs = buildAxis(26, [
+          [cfg.eyeL[0] - 0.08, cfg.eyeR[0] + 0.08, 0.012],
+          [cfg.mouth[0] - 0.07, cfg.mouth[0] + 0.07, 0.012],
+        ]);
+        const ys = buildAxis(40, [
+          [Math.min(...eyeYs) - 0.04, Math.max(...eyeYs) + 0.04, 0.005],
+          [cfg.mouth[1] - 0.035, cfg.mouth[1] + 0.035, 0.005],
+        ]);
+
+        const cols = xs.length;
+        const rows = ys.length;
+        const base = new Float32Array(cols * rows * 2);
+        const uvs = new Float32Array(cols * rows * 2);
+        let n = 0;
+        for (let j = 0; j < rows; j++) {
+          for (let i = 0; i < cols; i++) {
+            base[n] = xs[i] * W;
+            base[n + 1] = ys[j] * H;
+            uvs[n] = xs[i];
+            uvs[n + 1] = ys[j];
+            n += 2;
+          }
+        }
+        const indices = new Uint16Array((cols - 1) * (rows - 1) * 6);
+        let q = 0;
+        for (let j = 0; j < rows - 1; j++) {
+          for (let i = 0; i < cols - 1; i++) {
+            const a = j * cols + i;
+            const b = a + 1;
+            const c = a + cols;
+            const d = c + 1;
+            indices[q++] = a; indices[q++] = b; indices[q++] = c;
+            indices[q++] = b; indices[q++] = d; indices[q++] = c;
+          }
+        }
+
+        const mesh = new PIXI.SimpleMesh(tex, new Float32Array(base), uvs, indices);
+        const mouthG = new PIXI.Graphics();
+        const root = new PIXI.Container();
+        root.addChild(mesh);
+        root.addChild(mouthG);
+        root.pivot.set(W * 0.5, H * 0.5);
+        app.stage.addChild(root);
+
+        puppet = { root, mesh, mouthG, base, W, H, cfg, fit: 1, baseY: 0 };
+        fitPuppet();
+        showStatus('', 0);
+        return true;
+      } catch (err) {
+        console.error('Puppet Load Error:', err);
+        showStatus('⚠️ Failed to load puppet artwork', 3500);
+        return false;
+      }
+    }
+
+    const _pd = [0, 0];
+    function updatePuppet(t, mouthAa, mouthOh, blinkVal) {
+      const p = puppet;
+      if (!p || !pixiApp) return;
+      const { W, H, cfg, base, mesh, mouthG, root } = p;
+      const emo = state.emotion;
+      const mx = state.smoothMouseX;
+      const my = state.smoothMouseY;
+
+      // ---- Emotion → pose parameters ----
+      let swayX = 0, tilt = 0, headDy = 0, squint = 0, bounce = 0, wobble = 0, flutter = 1.0, drop = 0;
+      const emoT = t - state.emotionTriggerTime;
+      if (emo === 'happy') {
+        squint = 0.55; tilt = 0.035; bounce = Math.abs(Math.sin(t * 6.0)) * 5.0;
+      } else if (emo === 'annoyed') {
+        squint = 0.30; tilt = -0.05; headDy = -0.004 * H;
+      } else if (emo === 'sleepy') {
+        squint = 0.72; headDy = 0.012 * H; tilt = Math.sin(t * 0.7) * 0.03;
+      } else if (emo === 'dizzy') {
+        wobble = Math.sin(t * 9.0) * 0.12; swayX = Math.sin(t * 7.0) * 10; squint = 0.4 + 0.3 * Math.sin(t * 9.0); flutter = 2.2;
+      } else if (emo === 'dance') {
+        swayX = Math.sin(t * 5.0) * 16; tilt = Math.sin(t * 5.0) * 0.07; bounce = Math.abs(Math.sin(t * 5.0)) * 9.0; flutter = 2.6; squint = 0.35;
+      } else if (emo === 'groove' || (state.musicPlaying && (emo === 'idle' || emo === 'groove'))) {
+        swayX = Math.sin(t * 3.8) * 10; tilt = Math.sin(t * 3.8) * 0.05; bounce = Math.abs(Math.sin(t * 7.2)) * 6.0; flutter = 1.9;
+      } else if (emo === 'sit') {
+        drop = 0.015 * H;
+      } else if (emo === 'talking' || state.isTalking) {
+        headDy = Math.sin(t * 7.0) * 0.0016 * H; tilt = Math.sin(t * 3.2) * 0.012;
+      }
+      if (state.isMoving || emo === 'walking') {
+        bounce = Math.max(bounce, Math.abs(Math.sin(t * 8.5)) * 6.0);
+        flutter = Math.max(flutter, 2.0);
+      }
+
+      const close = Math.min(1, Math.max(blinkVal, squint));
+      const breath = Math.sin(t * 1.7);
+      const headAng = tilt + mx * 0.07 + Math.sin(t * 0.9) * 0.012 + wobble;
+      const cosA = Math.cos(headAng);
+      const sinA = Math.sin(headAng);
+      const nx = cfg.neck[0] * W;
+      const ny = cfg.neck[1] * H;
+      const mOpen = Math.min(1, mouthAa + mouthOh * 0.3);
+      const mx0 = cfg.mouth[0] * W;
+      const my0 = cfg.mouth[1] * H;
+      const mW = cfg.mouthW * W;
+      const mH = cfg.mouthH * H;
+      const eyes = [
+        [cfg.eyeL[0] * W, cfg.eyeL[1] * H],
+        [cfg.eyeR[0] * W, cfg.eyeR[1] * H],
+      ];
+      const eRx = cfg.eyeRx * W;
+      const eRy = cfg.eyeRy * H;
+      const swayBody = Math.sin(t * 0.8) * 0.004 * W;
+
+      const disp = (bx, by) => {
+        const u = bx / W;
+        const v = by / H;
+        let dx = 0;
+        let dy = 0;
+
+        // Global body sway (top of body moves more than the hips)
+        dx += (swayBody + swayX) * (1.0 - v);
+
+        // Breathing (chest rises & expands)
+        const wB = sstep(0.25, 0.38, v) * (1.0 - sstep(0.62, 0.85, v)) * (1.0 - 0.5 * sstep(0.30, 0.5, Math.abs(u - 0.5)));
+        dy -= wB * breath * H * 0.0035;
+        dx += (u - 0.5) * W * wB * breath * 0.0035;
+
+        // Hair / cloth flutter on the outer edges
+        const edge = sstep(cfg.hairEdge, cfg.hairEdge + 0.26, Math.abs(u - 0.5)) * sstep(0.18, 0.6, v);
+        const ph = t * 1.4 + v * 4.0 + (u < 0.5 ? 0.0 : 1.7);
+        dx += edge * Math.sin(ph) * W * 0.008 * flutter;
+        dy += edge * Math.cos(ph * 0.7) * H * 0.002 * flutter;
+
+        // Head: rotate around neck + follow cursor
+        const wHead = 1.0 - sstep(cfg.neck[1] - 0.02, cfg.neck[1] + 0.05, v);
+        if (wHead > 0.0) {
+          const rx = bx - nx;
+          const ry = by - ny;
+          dx += wHead * ((cosA * rx - sinA * ry) - rx);
+          dy += wHead * ((sinA * rx + cosA * ry) - ry);
+          dx += wHead * mx * 0.012 * W;
+          dy += wHead * (-my * 0.006 * H + headDy);
+          // Hat tip drifts a little
+          dx += wHead * (1.0 - sstep(0.0, 0.1, v)) * Math.sin(t * 1.5 + 1.0) * W * 0.006 * flutter;
+        }
+
+        // Eyes: blink / squint + subtle glance toward cursor
+        for (let k = 0; k < 2; k++) {
+          const ex = (bx - eyes[k][0]) / eRx;
+          const ey = (by - eyes[k][1]) / eRy;
+          const dd = Math.sqrt(ex * ex + ey * ey);
+          const wE = 1.0 - sstep(1.0, 2.2, dd);
+          if (wE > 0.0) dy += (eyes[k][1] - by) * close * 0.88 * wE;
+          const wG = 1.0 - sstep(0.7, 1.5, dd);
+          if (wG > 0.0) {
+            dx += wG * mx * 0.0055 * W;
+            dy -= wG * my * 0.0025 * H;
+          }
+        }
+
+        // Mouth: lip-sync jaw drop + "oh" pucker
+        if (mOpen > 0.01) {
+          const mxn = (bx - mx0) / mW;
+          const myn = (by - my0) / mH;
+          const dm = Math.sqrt(mxn * mxn + myn * myn);
+          const wM = 1.0 - sstep(0.6, 1.8, dm);
+          if (wM > 0.0) {
+            dy += wM * mOpen * H * 0.011 * sstep(my0 - 0.002 * H, my0 + 0.006 * H, by);
+            dx -= (bx - mx0) * wM * mouthOh * 0.12;
+          }
+        }
+
+        dy += drop + bounce * -1.0;
+        _pd[0] = dx;
+        _pd[1] = dy;
+      };
+
+      const verts = mesh.vertices;
+      const count = base.length;
+      for (let i = 0; i < count; i += 2) {
+        disp(base[i], base[i + 1]);
+        verts[i] = base[i] + _pd[0];
+        verts[i + 1] = base[i + 1] + _pd[1];
+      }
+
+      // Dark mouth interior that opens with the voice
+      mouthG.clear();
+      if (mOpen > 0.1) {
+        disp(mx0, my0);
+        const cx = mx0 + _pd[0];
+        const cy = my0 + _pd[1] + mH * 0.25 * mOpen;
+        const rx = mW * 0.28 * (1.0 - 0.35 * mouthOh);
+        const ry = Math.max(1.0, mH * 0.55 * mOpen);
+        mouthG.beginFill(0x4a1420, 0.92);
+        mouthG.drawEllipse(cx, cy, rx, ry);
+        mouthG.endFill();
+        mouthG.beginFill(0xd9667a, 0.85);
+        mouthG.drawEllipse(cx, cy + ry * 0.45, rx * 0.6, ry * 0.4);
+        mouthG.endFill();
+      }
+
+      // Whole-puppet placement (flip when walking right, idle float)
+      const sgn = state.facingRight ? -1 : 1;
+      root.scale.x = sgn * p.fit;
+      root.scale.y = p.fit;
+      root.y = p.baseY + (state.isMoving ? 0 : Math.sin(t * 2.2) * 1.5);
+
+      pixiApp.renderer.render(pixiApp.stage);
+    }
+
+    // =========================================================================
+    // MUSIC SPECTRUM VISUALIZER & PARTICLES
+    // =========================================================================
+    let spectrumAlpha = 0.0;
+    const NUM_SPECTRUM_BARS = 36;
+    const spectrumBars = Array.from({ length: NUM_SPECTRUM_BARS }, () => ({
+      val: 0,
+      peak: 0,
+      peakSpeed: 0,
+    }));
+
+    const SPECTRUM_NOTES = ['♪', '♫', '♬', '♩', '✧', '✦', '💖'];
+    const spectrumParticles = [];
+    for (let i = 0; i < 24; i++) {
+      spectrumParticles.push({
+        x: Math.random(),
+        y: 1.0 + Math.random() * 0.3,
+        speed: 0.12 + Math.random() * 0.22,
+        swaySpeed: 1.5 + Math.random() * 2.0,
+        swayAmp: 0.02 + Math.random() * 0.03,
+        phase: Math.random() * Math.PI * 2,
+        char: SPECTRUM_NOTES[Math.floor(Math.random() * SPECTRUM_NOTES.length)],
+        size: 14 + Math.random() * 16,
+        alpha: 0.3 + Math.random() * 0.7,
+        hue: Math.random() > 0.5 ? 190 : 320,
+      });
+    }
+
+    function renderMusicSpectrum(dt, t) {
+      if (!spectrumCanvas || !sCtx) return;
+      const isVibing = (state.musicPlaying || state.emotion === 'dance' || state.emotion === 'groove') && state.spectrumEnabled;
+      const targetAlpha = isVibing ? 1.0 : 0.0;
+      spectrumAlpha += (targetAlpha - spectrumAlpha) * Math.min(1.0, dt * 4.0);
+
+      const W = spectrumCanvas.width;
+      const H = spectrumCanvas.height;
+
+      if (spectrumAlpha <= 0.005) {
+        sCtx.clearRect(0, 0, W, H);
+        return;
+      }
+
+      sCtx.clearRect(0, 0, W, H);
+      sCtx.save();
+      sCtx.globalAlpha = spectrumAlpha;
+
+      const energy = Math.max(0.35, state.musicEnergy || 1.0);
+      const isDance = state.emotion === 'dance';
+      const tempo = isDance ? 9.5 : 7.2;
+
+      // Equalizer bars along the lower third/half
+      const barCount = NUM_SPECTRUM_BARS;
+      const maxBarH = Math.min(180, H * 0.26) * energy;
+      const barW = Math.max(4, (W * 0.72) / barCount - 3);
+      const startX = (W - (barCount * (barW + 3))) * 0.5;
+      const baseY = H - 28;
+
+      // Floor glow
+      const floorGrad = sCtx.createRadialGradient(W * 0.5, baseY, 20, W * 0.5, baseY, W * 0.45);
+      floorGrad.addColorStop(0, 'rgba(56, 189, 248, 0.28)');
+      floorGrad.addColorStop(0.5, 'rgba(236, 72, 153, 0.16)');
+      floorGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      sCtx.fillStyle = floorGrad;
+      sCtx.fillRect(0, baseY - 40, W, 70);
+
+      for (let i = 0; i < barCount; i++) {
+        const item = spectrumBars[i];
+        const centerDist = Math.abs(i - (barCount - 1) * 0.5) / ((barCount - 1) * 0.5);
+        const wave1 = Math.sin(t * tempo + i * 0.42);
+        const wave2 = Math.cos(t * (tempo * 0.6) + i * 0.85);
+        const beatPunch = Math.pow(Math.max(0, Math.sin(t * (tempo * 0.5))), 4.0) * 0.4;
+        const rawTarget = Math.max(0.08, (1.0 - centerDist * 0.35) * (0.35 + 0.35 * wave1 + 0.2 * wave2 + beatPunch)) * maxBarH;
+
+        item.val += (rawTarget - item.val) * Math.min(1.0, dt * 14.0);
+        if (item.val > item.peak) {
+          item.peak = item.val;
+          item.peakSpeed = 0;
+        } else {
+          item.peakSpeed += dt * 320;
+          item.peak = Math.max(0, item.peak - item.peakSpeed * dt);
+        }
+
+        const bx = startX + i * (barW + 3);
+        const by = baseY - item.val;
+        const bh = item.val;
+
+        // Gradient bar
+        const grad = sCtx.createLinearGradient(0, baseY, 0, by);
+        const hue = 190 + (i / barCount) * 140; // Cyan -> Magenta
+        grad.addColorStop(0, `hsla(${hue}, 90%, 55%, 0.85)`);
+        grad.addColorStop(1, `hsla(${hue + 25}, 95%, 65%, 0.95)`);
+
+        sCtx.fillStyle = grad;
+        sCtx.shadowColor = `hsla(${hue}, 90%, 60%, 0.75)`;
+        sCtx.shadowBlur = 8;
+
+        // Rounded bar
+        sCtx.beginPath();
+        if (typeof sCtx.roundRect === 'function') {
+          sCtx.roundRect(bx, by, barW, bh, [4, 4, 0, 0]);
+        } else {
+          sCtx.rect(bx, by, barW, bh);
+        }
+        sCtx.fill();
+
+        // Peak cap
+        const peakY = baseY - item.peak - 4;
+        sCtx.fillStyle = '#ffffff';
+        sCtx.shadowColor = '#38bdf8';
+        sCtx.shadowBlur = 10;
+        sCtx.fillRect(bx, peakY, barW, 2.5);
+      }
+
+      // Floating musical notes & sparkles
+      for (const p of spectrumParticles) {
+        p.y -= p.speed * dt * (0.8 + energy * 0.5);
+        p.phase += p.swaySpeed * dt;
+        const px = (p.x + Math.sin(p.phase) * p.swayAmp) * W;
+        const py = p.y * H;
+
+        if (p.y < -0.05) {
+          p.y = 1.05 + Math.random() * 0.2;
+          p.x = 0.15 + Math.random() * 0.7;
+          p.char = SPECTRUM_NOTES[Math.floor(Math.random() * SPECTRUM_NOTES.length)];
+        }
+
+        sCtx.font = `bold ${p.size}px "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+        sCtx.fillStyle = `hsla(${p.hue}, 90%, 70%, ${p.alpha * spectrumAlpha})`;
+        sCtx.shadowColor = `hsla(${p.hue}, 100%, 60%, 0.8)`;
+        sCtx.shadowBlur = 12;
+        sCtx.fillText(p.char, px, py);
+      }
+
+      sCtx.restore();
+    }
+
+    window.setMusicSpectrumEnabled = function(enabled) {
+      state.spectrumEnabled = !!enabled;
+    };
+
+    window.setMusicVibe = function(active, energy) {
+      state.musicPlaying = !!active;
+      state.musicEnergy = typeof energy === 'number' ? energy : (active ? 1.0 : 0.0);
+    };
+
+    // =========================================================================
+    // HEADPAT HEARTS & INERTIA SYSTEM (Phase 6)
+    // =========================================================================
+    const headpatHearts = [];
+    const HEART_CHARS = ['💖', '💕', '🌸', '✨', '💗', '🥰'];
+
+    function spawnHeadpatHearts() {
+      for (let i = 0; i < 8; i++) {
+        headpatHearts.push({
+          x: 0.44 + (Math.random() - 0.5) * 0.28,
+          y: 0.25 + Math.random() * 0.12,
+          vx: (Math.random() - 0.5) * 0.16,
+          vy: -0.22 - Math.random() * 0.25,
+          char: HEART_CHARS[Math.floor(Math.random() * HEART_CHARS.length)],
+          size: 18 + Math.random() * 16,
+          alpha: 1.0,
+          decay: 0.45 + Math.random() * 0.35,
+          scale: 0.4,
+          growSpeed: 2.2,
+        });
+      }
+    }
+
+    function renderHeadpatHearts(dt) {
+      if (!spectrumCanvas || !sCtx || headpatHearts.length === 0) return;
+      const W = spectrumCanvas.width;
+      const H = spectrumCanvas.height;
+      sCtx.save();
+      for (let i = headpatHearts.length - 1; i >= 0; i--) {
+        const h = headpatHearts[i];
+        h.x += h.vx * dt;
+        h.y += h.vy * dt;
+        h.scale = Math.min(1.0, h.scale + h.growSpeed * dt);
+        h.alpha -= h.decay * dt;
+        if (h.alpha <= 0 || h.y < -0.1) {
+          headpatHearts.splice(i, 1);
+          continue;
+        }
+        const px = h.x * W;
+        const py = h.y * H;
+        sCtx.font = `bold ${Math.round(h.size * h.scale)}px "Segoe UI Emoji", "Apple Color Emoji", sans-serif`;
+        sCtx.fillStyle = `rgba(244, 114, 182, ${Math.max(0, h.alpha)})`;
+        sCtx.shadowColor = '#ec4899';
+        sCtx.shadowBlur = 14;
+        sCtx.fillText(h.char, px, py);
+      }
+      sCtx.restore();
+    }
+
+    window.triggerHeadpat = function() {
+      state.headpatActive = 1.0;
+      spawnHeadpatHearts();
+    };
+
+    window.setDragInertia = function(vx, vy) {
+      state.targetInertiaX = vx;
+      state.targetInertiaY = vy;
+    };
+
+    // =========================================================================
+    // 3. ADAPTIVE ANIMATION LOOP (30 FPS Idle / 45 FPS Active)
+    // =========================================================================
+    const clock = new THREE.Clock();
+    let lastFrameTime = 0;
+
+    function animate(nowMs) {
+      requestAnimationFrame(animate);
+      if (state.renderPaused) {
+        return;
+      }
+      const isBusy = isAudioElementPlaying || state.isTalking || state.isMoving || state.emotion === 'dance' || state.emotion === 'dizzy';
+      const minFrameInterval = isBusy ? 21.0 : 32.0;
+      if (nowMs && (nowMs - lastFrameTime) < minFrameInterval) {
+        return;
+      }
+      lastFrameTime = nowMs || 0;
+      const dt = Math.min(clock.getDelta(), 0.1);
+      const t = clock.getElapsedTime();
+
+      state.smoothMouseX += (state.mouseX - state.smoothMouseX) * Math.min(1, dt * 8.0);
+      state.smoothMouseY += (state.mouseY - state.smoothMouseY) * Math.min(1, dt * 8.0);
+      state.dragInertiaX += (state.targetInertiaX - state.dragInertiaX) * Math.min(1.0, dt * 10.0);
+      state.dragInertiaY += (state.targetInertiaY - state.dragInertiaY) * Math.min(1.0, dt * 10.0);
+      if (state.headpatActive > 0) {
+        state.headpatActive = Math.max(0, state.headpatActive - dt * 0.38);
+      }
+
+      // Blink timer
+      state.blinkTimer += dt;
+      let blinkVal = 0.0;
+      if (state.blinkTimer >= state.nextBlink) {
+        const blinkElapsed = state.blinkTimer - state.nextBlink;
+        if (blinkElapsed < 0.14) {
+          blinkVal = Math.sin((blinkElapsed / 0.14) * Math.PI);
+        } else {
+          state.blinkTimer = 0;
+          state.nextBlink = 2.2 + Math.random() * 3.2;
+        }
+      }
+
+      // Real-Time FFT Audio Lip-Sync (or procedural fallback when muted)
+      let mouthAa = 0.0;
+      let mouthOh = 0.0;
+      if (isAudioElementPlaying && analyser && freqData) {
+        analyser.getByteFrequencyData(freqData);
+        // Vocal fundamental & first formant bins (approx 150Hz - 2200Hz)
+        let lowMidSum = 0;
+        let highMidSum = 0;
+        for (let i = 2; i < 18; i++) lowMidSum += freqData[i];
+        for (let i = 18; i < 42; i++) highMidSum += freqData[i];
+        const lowAvg = lowMidSum / (16 * 255);
+        const highAvg = highMidSum / (24 * 255);
+        mouthAa = Math.min(1.0, Math.max(0.0, (lowAvg - 0.06) * 2.4));
+        mouthOh = Math.min(0.85, Math.max(0.0, (highAvg - 0.05) * 2.0));
+      } else if (state.isTalking) {
+        mouthAa = Math.max(0, Math.sin(t * 17.5) * 0.55 + Math.cos(t * 11.0) * 0.2);
+        mouthOh = Math.max(0, Math.sin(t * 9.5 + 1.0) * 0.3);
+      }
+
+      const activelySpeaking = isAudioElementPlaying || state.isTalking;
+
+      // ---- Render 3D VRM Mode ----
+      if (state.mode === 'vrm') {
+        if (currentVrm) {
+          const hum = currentVrm.humanoid;
+          const exp = currentVrm.expressionManager;
+
+          lookAtTarget.position.x = state.smoothMouseX * 0.85;
+          lookAtTarget.position.y = 1.25 + state.smoothMouseY * 0.55;
+
+          if (hum) {
+            const spine = hum.getNormalizedBoneNode('spine');
+            const chest = hum.getNormalizedBoneNode('chest');
+            const neck = hum.getNormalizedBoneNode('neck');
+            const head = hum.getNormalizedBoneNode('head');
+            const hips = hum.getNormalizedBoneNode('hips');
+            const lUpperArm = hum.getNormalizedBoneNode('leftUpperArm');
+            const rUpperArm = hum.getNormalizedBoneNode('rightUpperArm');
+            const lLowerArm = hum.getNormalizedBoneNode('leftLowerArm');
+            const rLowerArm = hum.getNormalizedBoneNode('rightLowerArm');
+            const lUpperLeg = hum.getNormalizedBoneNode('leftUpperLeg');
+            const rUpperLeg = hum.getNormalizedBoneNode('rightUpperLeg');
+            const lLowerLeg = hum.getNormalizedBoneNode('leftLowerLeg');
+            const rLowerLeg = hum.getNormalizedBoneNode('rightLowerLeg');
+
+            const breath = Math.sin(t * 2.2);
+            const sway = Math.sin(t * 1.3);
+            const emoElapsed = t - state.emotionTriggerTime;
+
+            let targetYaw = state.smoothMouseX * 0.18;
+            if (state.peekingSide === 'left') {
+              targetYaw = 0.38;
+              currentVrm.scene.rotation.y += (targetYaw - currentVrm.scene.rotation.y) * Math.min(1, dt * 7.0);
+            } else if (state.peekingSide === 'right') {
+              targetYaw = -0.38;
+              currentVrm.scene.rotation.y += (targetYaw - currentVrm.scene.rotation.y) * Math.min(1, dt * 7.0);
+            } else if (state.emotion === 'dance' && emoElapsed < 4.5) {
+              targetYaw = (emoElapsed * Math.PI * 1.6) % (Math.PI * 2);
+              currentVrm.scene.rotation.y = targetYaw;
+            } else {
+              if (state.isMoving || state.emotion === 'walking') {
+                targetYaw = state.facingRight ? 0.38 : -0.38;
+              }
+              currentVrm.scene.rotation.y += (targetYaw - currentVrm.scene.rotation.y) * Math.min(1, dt * 7.0);
+            }
+            let peekLean = 0.0;
+            if (state.peekingSide === 'left') {
+              peekLean = 0.14;
+            } else if (state.peekingSide === 'right') {
+              peekLean = -0.14;
+            }
+            currentVrm.scene.rotation.z = (-state.dragInertiaX * 0.22) + peekLean;
+            currentVrm.scene.rotation.x = state.dragInertiaY * 0.16;
+
+            if (spine) {
+              spine.rotation.x = breath * 0.025;
+              spine.rotation.z = state.emotion === 'dizzy' ? Math.sin(t * 9.0) * 0.11 : sway * 0.025;
+            }
+            if (chest) {
+              chest.rotation.x = breath * 0.03;
+            }
+            if (neck) {
+              neck.rotation.y = state.smoothMouseX * 0.22;
+              neck.rotation.x = -state.smoothMouseY * 0.14;
+            }
+            if (head) {
+              let headShake = 0;
+              if (state.emotion === 'annoyed' && emoElapsed < 1.2) {
+                headShake = Math.sin(t * 26.0) * 0.14;
+              } else if (state.emotion === 'dizzy') {
+                headShake = Math.sin(t * 14.0) * 0.24;
+              }
+              head.rotation.y = state.smoothMouseX * 0.28 + headShake;
+              head.rotation.x = state.emotion === 'sleepy'
+                ? 0.18 + Math.sin(t * 1.2) * 0.08
+                : (-state.smoothMouseY * 0.18 + Math.sin(t * 1.8) * 0.025);
+              head.rotation.z = state.emotion === 'dizzy'
+                ? Math.cos(t * 14.0) * 0.22
+                : ((state.emotion === 'idle' || state.emotion === 'happy') ? 0.07 : -0.04) * sway;
+              if (state.headpatActive > 0) {
+                head.rotation.z += Math.sin(t * 7.5) * 0.08 * state.headpatActive;
+                head.rotation.x += 0.08 * state.headpatActive;
+              }
+              if (state.peekingSide === 'left') {
+                head.rotation.z += 0.09;
+              } else if (state.peekingSide === 'right') {
+                head.rotation.z -= 0.09;
+              }
+            }
+
+            if (state.isMoving || state.emotion === 'walking') {
+              const walkCycle = t * 8.5;
+              const stride = Math.sin(walkCycle);
+              if (hips) {
+                hips.position.y = Math.abs(Math.cos(walkCycle)) * 0.035;
+                hips.rotation.y = stride * 0.08;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(-stride * 0.45, 0, -1.18);
+              if (rUpperArm) rUpperArm.rotation.set(stride * 0.45, 0, 1.18);
+              if (lLowerArm) lLowerArm.rotation.set(-0.35, 0, 0);
+              if (rLowerArm) rLowerArm.rotation.set(-0.35, 0, 0);
+              if (lUpperLeg) lUpperLeg.rotation.set(stride * 0.52, 0, 0);
+              if (rUpperLeg) rUpperLeg.rotation.set(-stride * 0.52, 0, 0);
+              if (lLowerLeg) lLowerLeg.rotation.set(Math.max(0, -stride) * 0.55, 0, 0);
+              if (rLowerLeg) rLowerLeg.rotation.set(Math.max(0, stride) * 0.55, 0, 0);
+              const walkCurl = 0.42 + Math.sin(walkCycle) * 0.08;
+              applyHandPosing('left', walkCurl, 0.35, -stride * 0.22 + 0.08, -stride * 0.04, 0.06);
+              applyHandPosing('right', walkCurl, 0.35, stride * 0.22 + 0.08, stride * 0.04, -0.06);
+            } else if (state.emotion === 'dance') {
+              const beat = t * 7.5;
+              if (hips) {
+                hips.position.y = Math.abs(Math.sin(beat)) * 0.045;
+                hips.rotation.z = Math.cos(beat * 0.5) * 0.09;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.3, 0.2, -0.75 + Math.sin(beat) * 0.25);
+              if (rUpperArm) rUpperArm.rotation.set(0.3, -0.2, 0.75 + Math.cos(beat) * 0.25);
+              if (lLowerArm) lLowerArm.rotation.set(-0.85, 0.3, 0.2);
+              if (rLowerArm) rLowerArm.rotation.set(-0.85, -0.3, -0.2);
+              if (lUpperLeg) lUpperLeg.rotation.set(Math.sin(beat) * 0.25, 0, -0.05);
+              if (rUpperLeg) rUpperLeg.rotation.set(-Math.sin(beat) * 0.25, 0, 0.05);
+              const danceCurl = 0.35 + Math.sin(beat * 2.0) * 0.25;
+              applyHandPosing('left', danceCurl, 0.5, Math.sin(beat) * 0.3, 0.15, 0.2);
+              applyHandPosing('right', danceCurl, 0.5, Math.cos(beat) * 0.3, -0.15, -0.2);
+            } else if (state.emotion === 'sit') {
+              // Perched 3D Sitting Pose with swinging legs
+              if (hips) {
+                hips.position.y = -0.12;
+                hips.rotation.z = sway * 0.025;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.18, 0.1, -1.12);
+              if (rUpperArm) rUpperArm.rotation.set(0.18, -0.1, 1.12);
+              if (lLowerArm) lLowerArm.rotation.set(-0.35, 0.2, 0.1);
+              if (rLowerArm) rLowerArm.rotation.set(-0.35, -0.2, -0.1);
+              if (lUpperLeg) lUpperLeg.rotation.set(1.22, 0.06, -0.05);
+              if (rUpperLeg) rUpperLeg.rotation.set(1.22, -0.06, 0.05);
+              if (lLowerLeg) lLowerLeg.rotation.set(-1.25 + Math.sin(t * 2.8) * 0.18, 0, 0);
+              if (rLowerLeg) rLowerLeg.rotation.set(-1.25 - Math.sin(t * 2.8) * 0.18, 0, 0);
+              applyHandPosing('left', 0.55, 0.25, 0.25, 0.12, 0.05);
+              applyHandPosing('right', 0.55, 0.25, 0.25, -0.12, -0.05);
+            } else if (state.emotion === 'groove' || (state.musicPlaying && (state.emotion === 'idle' || state.emotion === 'groove'))) {
+              // Music Vibe-Sync Head-Bob & Rhythm Groove
+              const grooveBeat = t * 6.8;
+              if (hips) {
+                hips.position.y = Math.abs(Math.sin(grooveBeat)) * 0.03;
+                hips.rotation.z = Math.sin(grooveBeat * 0.5) * 0.07;
+              }
+              if (head) {
+                head.rotation.x += Math.abs(Math.sin(grooveBeat)) * 0.14;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.2, 0.15, -0.98 + Math.sin(grooveBeat) * 0.12);
+              if (rUpperArm) rUpperArm.rotation.set(0.2, -0.15, 0.98 - Math.sin(grooveBeat) * 0.12);
+              if (lLowerArm) lLowerArm.rotation.set(-0.65, 0.2, 0.15);
+              if (rLowerArm) rLowerArm.rotation.set(-0.65, -0.2, -0.15);
+              const grooveCurl = 0.38 + Math.sin(grooveBeat) * 0.18;
+              applyHandPosing('left', grooveCurl, 0.4, 0.15, Math.sin(grooveBeat * 0.5) * 0.2, 0.1);
+              applyHandPosing('right', grooveCurl, 0.4, 0.15, -Math.sin(grooveBeat * 0.5) * 0.2, -0.1);
+            } else if (state.emotion === 'happy') {
+              const bounce = Math.sin(t * 5.2);
+              if (hips) {
+                hips.position.y = Math.abs(bounce) * 0.02;
+                hips.rotation.z = bounce * 0.05;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.25, 0.35, -0.92);
+              if (rUpperArm) rUpperArm.rotation.set(0.25, -0.35, 0.92);
+              if (lLowerArm) lLowerArm.rotation.set(-0.95, 0.45, 0.35);
+              if (rLowerArm) rLowerArm.rotation.set(-0.95, -0.45, -0.35);
+              const happyCurl = 0.22 + Math.sin(t * 6.0) * 0.12;
+              applyHandPosing('left', happyCurl, 0.65, -0.2, 0.15, 0.18);
+              applyHandPosing('right', happyCurl, 0.65, -0.2, -0.15, -0.18);
+            } else if (state.emotion === 'dizzy') {
+              if (hips) {
+                hips.position.y = 0;
+                hips.rotation.z = Math.sin(t * 8.0) * 0.08;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.2, 0, -0.95 + Math.sin(t * 10.0) * 0.15);
+              if (rUpperArm) rUpperArm.rotation.set(0.2, 0, 0.95 + Math.cos(t * 10.0) * 0.15);
+              if (lLowerArm) lLowerArm.rotation.set(-0.4, 0, 0);
+              if (rLowerArm) rLowerArm.rotation.set(-0.4, 0, 0);
+              const limpCurl = 0.4 + Math.sin(t * 8.0) * 0.2;
+              applyHandPosing('left', limpCurl, 0.3, Math.sin(t * 10.0) * 0.3, 0, 0.2);
+              applyHandPosing('right', limpCurl, 0.3, Math.cos(t * 10.0) * 0.3, 0, -0.2);
+            } else if (state.emotion === 'annoyed') {
+              if (hips) {
+                hips.position.y = 0;
+                hips.rotation.z = 0.04;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.15, 0.25, -0.85);
+              if (rUpperArm) rUpperArm.rotation.set(0.15, -0.25, 0.85);
+              if (lLowerArm) lLowerArm.rotation.set(-0.65, 0.5, 0.45);
+              if (rLowerArm) rLowerArm.rotation.set(-0.65, -0.5, -0.45);
+              if (lUpperLeg) lUpperLeg.rotation.set(0, 0, -0.04);
+              if (rUpperLeg) rUpperLeg.rotation.set(0, 0, 0.04);
+              if (lLowerLeg) lLowerLeg.rotation.set(0, 0, 0);
+              if (rLowerLeg) rLowerLeg.rotation.set(0, 0, 0);
+              applyHandPosing('left', 0.95, 0.1, 0.15, 0.1, 0.2);
+              applyHandPosing('right', 0.95, 0.1, 0.15, -0.1, -0.2);
+            } else if (state.emotion === 'talking' || activelySpeaking) {
+              if (hips) hips.position.y = 0;
+              const talkWave = Math.sin(t * 4.5);
+              if (lUpperArm) lUpperArm.rotation.set(0.12, 0, -1.16 + breath * 0.03);
+              if (rUpperArm) rUpperArm.rotation.set(0.28 + talkWave * 0.08, -0.15, 0.98);
+              if (lLowerArm) lLowerArm.rotation.set(-0.22, 0, 0);
+              if (rLowerArm) rLowerArm.rotation.set(-0.75 + talkWave * 0.18, -0.3, -0.2);
+              if (lUpperLeg) lUpperLeg.rotation.set(0, 0, 0);
+              if (rUpperLeg) rUpperLeg.rotation.set(0, 0, 0);
+              if (lLowerLeg) lLowerLeg.rotation.set(0, 0, 0);
+              if (rLowerLeg) rLowerLeg.rotation.set(0, 0, 0);
+              const talkCurl = 0.32 + Math.sin(t * 5.0) * 0.22;
+              applyHandPosing('left', 0.4, 0.35, 0.05, 0.05, 0.05);
+              applyHandPosing('right', talkCurl, 0.5, -0.25 + Math.sin(t * 4.5) * 0.2, -0.2, -0.15);
+            } else {
+              if (hips) {
+                hips.position.y = 0;
+                hips.rotation.z = sway * 0.02;
+              }
+              if (lUpperArm) lUpperArm.rotation.set(0.06, 0, -1.20 + breath * 0.025);
+              if (rUpperArm) rUpperArm.rotation.set(0.06, 0, 1.20 - breath * 0.025);
+              if (lLowerArm) lLowerArm.rotation.set(-0.18, 0.12, 0.08);
+              if (rLowerArm) rLowerArm.rotation.set(-0.18, -0.12, -0.08);
+              if (lUpperLeg) lUpperLeg.rotation.set(0, 0, -0.02);
+              if (rUpperLeg) rUpperLeg.rotation.set(0, 0, 0.02);
+              if (lLowerLeg) lLowerLeg.rotation.set(0, 0, 0);
+              if (rLowerLeg) rLowerLeg.rotation.set(0, 0, 0);
+              const idleBreath = Math.sin(t * 2.2) * 0.05;
+              applyHandPosing('left', 0.45 + idleBreath, 0.3, 0.08, 0.04, 0.04);
+              applyHandPosing('right', 0.45 + idleBreath, 0.3, 0.08, -0.04, -0.04);
+            }
+          }
+
+          if (exp) {
+            const effectiveBlink = state.emotion === 'sleepy' ? Math.max(0.68, blinkVal) : blinkVal;
+            setExpressionSafe(exp, ['blink', 'Blink'], effectiveBlink);
+            setExpressionSafe(exp, ['aa', 'A'], mouthAa);
+            setExpressionSafe(exp, ['oh', 'O'], state.emotion === 'dizzy' ? Math.max(0.55, mouthOh) : mouthOh);
+
+            const isAnnoyed = state.emotion === 'annoyed';
+            const isFullHappy = state.emotion === 'happy' || state.emotion === 'dance';
+            const isMildHappy = state.emotion === 'talking' || state.emotion === 'walking';
+            setExpressionSafe(exp, ['angry', 'Angry'], isAnnoyed ? 0.85 : 0.0);
+            setExpressionSafe(exp, ['happy', 'Happy', 'joy', 'Joy'], isFullHappy ? 0.88 : (isMildHappy ? 0.35 : 0.0));
+            setExpressionSafe(exp, ['relaxed', 'Relaxed'], (state.emotion === 'idle' || state.emotion === 'sleepy') ? 0.55 : 0.0);
+            setExpressionSafe(exp, ['surprised', 'Surprised'], state.emotion === 'dizzy' ? 0.8 : 0.0);
+
+            if (state.headpatActive > 0) {
+              setExpressionSafe(exp, ['happy', 'Happy', 'joy', 'Joy'], Math.max(0.96 * state.headpatActive, isFullHappy ? 0.88 : (isMildHappy ? 0.35 : 0.0)));
+              setExpressionSafe(exp, ['relaxed', 'Relaxed'], Math.max(0.88 * state.headpatActive, (state.emotion === 'idle' || state.emotion === 'sleepy') ? 0.55 : 0.0));
+              setExpressionSafe(exp, ['blink', 'Blink'], Math.max(0.55 * state.headpatActive, effectiveBlink));
+            }
+          }
+
+          // Animate 3D Wardrobe Props
+          if (propMeshes.cat_ears && propMeshes.cat_ears.visible) {
+            const earTwitch = Math.sin(t * 5.5) > 0.88 ? Math.sin(t * 28.0) * 0.14 : 0;
+            propMeshes.cat_ears.children[0].rotation.z = -0.32 + earTwitch;
+            propMeshes.cat_ears.children[1].rotation.z = 0.32 - earTwitch;
+          }
+          if (propMeshes.halo && propMeshes.halo.visible) {
+            propMeshes.halo.position.y = 0.26 + Math.sin(t * 3.0) * 0.012;
+            propMeshes.halo.rotation.z = t * 1.2;
+          }
+          if (propMeshes.angel_wings && propMeshes.angel_wings.visible && propMeshes.angel_wings.userData) {
+            const flap = Math.sin(t * 3.6) * 0.18;
+            const flapHover = Math.sin(t * 1.8) * 0.04;
+            const { leftWing, rightWing } = propMeshes.angel_wings.userData;
+            if (leftWing) {
+              leftWing.rotation.y = -0.28 + flap + state.dragInertiaX * 0.35;
+              leftWing.rotation.z = 0.08 + flapHover;
+            }
+            if (rightWing) {
+              rightWing.rotation.y = 0.28 - flap + state.dragInertiaX * 0.35;
+              rightWing.rotation.z = -0.08 - flapHover;
+            }
+          }
+          if (propMeshes.witch_hat && propMeshes.witch_hat.visible) {
+            propMeshes.witch_hat.rotation.z = -0.06 + Math.sin(t * 1.8) * 0.03;
+          }
+          if (propMeshes.fox_tail && propMeshes.fox_tail.visible) {
+            const tailSway = Math.sin(t * 2.4) * 0.22;
+            propMeshes.fox_tail.rotation.z = tailSway - state.dragInertiaX * 0.45;
+            propMeshes.fox_tail.rotation.x = -0.55 + Math.sin(t * 4.8) * 0.08 - state.dragInertiaY * 0.35;
+          }
+          if (propMeshes.cyber_sword && propMeshes.cyber_sword.visible) {
+            propMeshes.cyber_sword.rotation.y = 0.18 + Math.sin(t * 1.5) * 0.04;
+          }
+          if (propMeshes.coffee_mug && propMeshes.coffee_mug.visible) {
+            propMeshes.coffee_mug.position.y = 0.035 + Math.sin(t * 2.5) * 0.003;
+          }
+          if (propMeshes.smartphone && propMeshes.smartphone.visible) {
+            propMeshes.smartphone.rotation.z = 0.5 + Math.sin(t * 1.8) * 0.03;
+          }
+
+          currentVrm.update(dt);
+        }
+        renderer.render(scene, camera);
+      }
+
+      // ---- Render 2D Live2D Mode ----
+      if (state.mode === 'live2d' && currentLive2D && pixiApp) {
+        const focusX = (state.smoothMouseX * 0.5 + 0.5) * pixiApp.screen.width;
+        const focusY = (-state.smoothMouseY * 0.5 + 0.5) * pixiApp.screen.height;
+        currentLive2D.focus(focusX, focusY);
+
+        const baseScale = Math.abs(currentLive2D.scale.x);
+        currentLive2D.scale.x = state.facingRight ? -baseScale : baseScale;
+
+        const isDancing = state.emotion === 'dance';
+        const isVibingLive2D = state.musicPlaying || state.emotion === 'groove' || isDancing;
+        const peekRot = state.peekingSide === 'left' ? 0.12 : (state.peekingSide === 'right' ? -0.12 : 0);
+
+        if (state.isMoving || state.emotion === 'walking') {
+          currentLive2D.y = pixiApp.screen.height * 0.52 - Math.abs(Math.sin(t * 8.5)) * 8.0;
+          currentLive2D.rotation = peekRot;
+        } else if (isDancing) {
+          // Energetic idol bounce & rotation sway
+          currentLive2D.y = pixiApp.screen.height * 0.52 - Math.abs(Math.sin(t * 8.2)) * 14.0;
+          currentLive2D.rotation = peekRot + Math.sin(t * 4.1) * 0.08;
+        } else if (isVibingLive2D) {
+          // Continuous music groove rhythm bob & sway
+          currentLive2D.y = pixiApp.screen.height * 0.52 - Math.abs(Math.sin(t * 6.8)) * 9.0;
+          currentLive2D.rotation = peekRot + Math.sin(t * 3.4) * 0.05;
+        } else {
+          currentLive2D.y = pixiApp.screen.height * 0.52 + Math.sin(t * 2.2) * 2.5;
+          currentLive2D.rotation = peekRot;
+        }
+
+        try {
+          const core = currentLive2D.internalModel && currentLive2D.internalModel.coreModel;
+          if (core) {
+            if (typeof core.setParameterValueById === 'function') {
+              core.setParameterValueById('ParamMouthOpenY', mouthAa);
+              if (isVibingLive2D) {
+                core.setParameterValueById('ParamAngleZ', Math.sin(t * 3.4) * 12.0);
+                core.setParameterValueById('ParamBodyAngleZ', Math.sin(t * 3.4) * 6.0);
+              }
+            } else if (typeof core.setParamFloat === 'function') {
+              core.setParamFloat('PARAM_MOUTH_OPEN_Y', mouthAa);
+              if (isVibingLive2D) {
+                core.setParamFloat('PARAM_ANGLE_Z', Math.sin(t * 3.4) * 12.0);
+                core.setParamFloat('PARAM_BODY_ANGLE_Z', Math.sin(t * 3.4) * 6.0);
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // ---- Render 2D Live Puppet Mode (mesh-deformed artwork) ----
+      if (state.mode === 'puppet' && puppet && pixiApp) {
+        updatePuppet(t, mouthAa, mouthOh, Math.max(blinkVal, emo_sleepyBlink()));
+      }
+
+      // ---- Render Music Spectrum Visualizer (Overlaid on all modes) ----
+      renderMusicSpectrum(dt, t);
+
+      // ---- Render Headpat Hearts Particle System (Phase 6) ----
+      renderHeadpatHearts(dt);
+    }
+    animate();
+
+    function emo_sleepyBlink() {
+      return state.emotion === 'sleepy' ? 0.25 : 0.0;
+    }
+
+    window.addEventListener('resize', () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      applyVRMCameraFraming();
+      if (spectrumCanvas) {
+        spectrumCanvas.width = w;
+        spectrumCanvas.height = h;
+      }
+      if (pixiApp) {
+        pixiApp.renderer.resize(w, h);
+        fitLive2DModel(currentLive2D);
+        fitPuppet();
+      }
+    });
+
+    window.setCameraFraming = function(framing, zoom, yOffset) {
+      if (framing) state.framing = framing;
+      if (typeof zoom === 'number' && !isNaN(zoom)) state.zoomMultiplier = zoom;
+      if (typeof yOffset === 'number' && !isNaN(yOffset)) state.yOffset = yOffset;
+
+      if (state.mode === 'vrm') {
+        applyVRMCameraFraming();
+      } else if (state.mode === 'live2d') {
+        fitLive2DModel(currentLive2D);
+      } else if (state.mode === 'puppet') {
+        fitPuppet();
+      }
+    };
+
+    window.setAvatarMode = async function(mode, modelUrl) {
+      state.mode = mode;
+      if (mode === 'vrm') {
+        live2dContainer.style.display = 'none';
+        vrmContainer.style.display = 'block';
+        if (pixiApp) pixiApp.ticker.stop();
+        if (modelUrl) {
+          await loadVRMModel(modelUrl);
+        }
+      } else if (mode === 'live2d') {
+        vrmContainer.style.display = 'none';
+        live2dContainer.style.display = 'block';
+        ensurePixiApp();
+        if (puppet) puppet.root.visible = false;
+        if (currentLive2D) currentLive2D.visible = true;
+        pixiApp.ticker.start();
+        if (modelUrl) {
+          await loadLive2DModel(modelUrl);
+        }
+      } else if (mode === 'puppet') {
+        vrmContainer.style.display = 'none';
+        live2dContainer.style.display = 'block';
+        ensurePixiApp();
+        if (currentLive2D) currentLive2D.visible = false;
+        // The puppet renders itself from our throttled loop, so the free-running ticker can sleep
+        pixiApp.ticker.stop();
+        if (modelUrl) {
+          await loadPuppet(modelUrl);
+        } else if (puppet) {
+          puppet.root.visible = true;
+        }
+      }
+    };
+
+    window.setAvatarState = function(emotion, facingRight, isMoving, isTalking) {
+      if (emotion && emotion !== state.emotion) {
+        state.emotion = emotion;
+        state.emotionTriggerTime = clock.getElapsedTime();
+        if (state.mode === 'live2d' && currentLive2D) {
+          try {
+            currentLive2D.motion(emotion === 'annoyed' ? 'tap_body' : 'idle');
+          } catch (_) {}
+        }
+      }
+      if (typeof facingRight === 'boolean') state.facingRight = facingRight;
+      if (typeof isMoving === 'boolean') state.isMoving = isMoving;
+      if (typeof isTalking === 'boolean') state.isTalking = isTalking;
+    };
+
+    window.setMouseLook = function(nx, ny) {
+      state.mouseX = Math.max(-1, Math.min(1, nx));
+      state.mouseY = Math.max(-1, Math.min(1, ny));
+    };
+
+    window.setPeekingMode = function(side) {
+      state.peekingSide = side || 'none';
+      if (currentLive2D) {
+        currentLive2D.rotation = state.peekingSide === 'left' ? 0.12 : (state.peekingSide === 'right' ? -0.12 : 0);
+      }
+    };
+
+    window.setRenderPaused = function(paused) {
+      state.renderPaused = !!paused;
+    };
+
+    const params = new URLSearchParams(window.location.search);
+    const initMode = params.get('mode') || 'vrm';
+    const initUrl = params.get('url') || '/assets/models/aria_default.vrm';
+    const initFraming = params.get('framing') || 'half';
+    const initZoom = parseFloat(params.get('zoom')) || 1.0;
+    const initYoff = parseFloat(params.get('yoff')) || 0.0;
+    state.framing = initFraming;
+    state.zoomMultiplier = initZoom;
+    state.yOffset = initYoff;
+    updateStageLightingPreset('auto');
+    setInterval(() => {
+      if (state.stageLighting === 'auto') updateStageLightingPreset('auto');
+    }, 30000);
+    window.setAvatarMode(initMode, initUrl);
+
+    if (window.__pendingAudioUrl) {
+      const pending = window.__pendingAudioUrl;
+      window.__pendingAudioUrl = null;
+      window.playVoiceAudio(pending);
+    }
+
+    // Native Rust IPC Mouse & Interaction Bridge
+    if (window.ipc) {
+      window.addEventListener('mousedown', (e) => {
+        if (e.button === 0) {
+          if (e.clientY < window.innerHeight * 0.28) {
+            window.ipc.postMessage('headpat');
+          } else {
+            window.ipc.postMessage('avatar_drag');
+          }
+        } else if (e.button === 1) {
+          window.ipc.postMessage('middle_click');
+        } else if (e.button === 2) {
+          window.ipc.postMessage('context_menu');
+        }
+      });
+
+      window.addEventListener('dblclick', (e) => {
+        if (e.button === 0) {
+          window.ipc.postMessage('poke');
+        }
+      });
+
+      window.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+      });
+    }
+  </script>
+</body>
+</html>

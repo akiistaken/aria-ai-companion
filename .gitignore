@@ -1,0 +1,17 @@
+# Build artefacts, local temp, and anything holding secrets.
+/target/
+/.tmp/
+
+# Runtime data lives in %APPDATA%\Aria now; these are the old in-repo locations.
+settings.json
+*.log
+/logs/
+/assets/tts_cache/
+/memory_vault.txt
+/aria_memory.json
+/app_launch_cache.json
+/.aria.pid
+
+# Scratch files
+/build-*.log
+/aria/aria_tree.txt

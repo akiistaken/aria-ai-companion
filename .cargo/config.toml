@@ -1,0 +1,11 @@
+# Cargo configuration for the whole Aria workspace.
+#
+# Build scripts (ring, cc, gcc) were failing with "Permission denied" in the system temp
+# directory, so TEMP/TMP are redirected to a repo-local, always-writable folder.
+[env]
+TMP = { value = ".tmp", relative = true, force = true }
+TEMP = { value = ".tmp", relative = true, force = true }
+
+# GNU toolchain is what this machine has (gcc from scoop/MinGW). There is no ld.lld on PATH,
+# and rust-lld is not shipped with the GNU toolchain, so the default MinGW linker is kept.
+# MSVC Build Tools are not installed either. See PROGRESS.md.

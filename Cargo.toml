@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["aria"]
+
+[profile.dev]
+opt-level = 1
+# Usable backtraces, far less debug info to write on Windows.
+debug = "line-tables-only"
+
+# Dependencies (Bevy especially) need optimisation to run smoothly even in dev builds.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 4
+strip = true

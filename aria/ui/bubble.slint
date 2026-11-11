@@ -1,0 +1,67 @@
+// Manga speech bubble: the tail is a separate triangle so the body can round its corners.
+//
+// The bubble has an explicit width rather than shrink-wrapping to its text. A shrink-wrapped
+// bubble creates a layout cycle (width depends on wrapped text height, which depends on width),
+// and Slint reports that as "Recursion detected". A fixed measure also reads better: the bubble
+// stops jumping width line by line while Aria speaks.
+
+import { Theme, Accent } from "tokens.slint";
+
+// A stroked triangle pointing down at Aria's head.
+component BubbleTail inherits Path {
+    in property <color> tint: Accent.edge;
+    in property <color> fill-tint: Theme.surface-raised;
+    width: 22px;
+    height: 11px;
+    viewbox-width: 22;
+    viewbox-height: 11;
+    commands: "M0 1 L11 11 L22 1";
+    fill: root.fill-tint;
+    stroke: root.tint;
+    stroke-width: 1.2px;
+    stroke-line-join: round;
+}
+
+export component SpeechBubble inherits Rectangle {
+    in property <string> text: "";
+    in property <length> measure: 300px;
+
+    width: root.measure;
+    height: 11px + Math.max(38px, label.preferred-height + 22px);
+
+    body := Rectangle {
+        width: root.measure;
+        height: Math.max(38px, label.preferred-height + 22px);
+        border-radius: Theme.r-lg;
+        background: Theme.surface-raised;
+        border-width: 1.2px;
+        border-color: Accent.edge;
+
+        drop-shadow-blur: 18px;
+        drop-shadow-offset-y: 6px;
+        drop-shadow-color: #00000088;
+
+        label := Text {
+            x: 15px;
+            y: 11px;
+            width: parent.width - 30px;
+            text: root.text;
+            wrap: word-wrap;
+            color: Theme.text;
+            font-size: 13px;
+            font-family: Theme.font-ui;
+            line-height-factor: 1.35;
+            horizontal-alignment: center;
+            vertical-alignment: top;
+            overflow: elide;
+            max-height: 160px;
+        }
+    }
+
+    BubbleTail {
+        x: (parent.width - self.width) / 2;
+        y: body.height - 1px;
+        tint: Accent.edge;
+        fill-tint: Theme.surface-raised;
+    }
+}

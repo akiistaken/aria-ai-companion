@@ -1,0 +1,335 @@
+// The desktop mascot: avatar stage slot, speech bubble above, command bar below.
+
+import { Theme, Accent, Glyph, Icon } from "tokens.slint";
+import { SpeechBubble } from "bubble.slint";
+
+component RoundButton inherits Rectangle {
+    in property <bool> active: false;
+    in property <bool> danger: false;
+    in property <string> icon: "";
+    in property <bool> enabled: true;
+    callback activated();
+
+    width: 28px;
+    height: 28px;
+    border-radius: Theme.r-sm;
+    background: touch.pressed && root.enabled
+        ? (root.danger ? Theme.danger : Accent.wash)
+        : (root.active ? Accent.wash : (touch.has-hover && root.enabled ? Theme.surface-raised : transparent));
+    border-width: 1px;
+    border-color: root.active ? Accent.edge : (touch.has-hover && root.enabled ? Theme.hairline-strong : Theme.hairline);
+    opacity: root.enabled ? 1.0 : 0.35;
+
+    Icon {
+        d: root.icon;
+        size: 16px;
+        tint: root.active || touch.pressed ? Theme.accent : (touch.has-hover && root.enabled ? Theme.text : Theme.text-secondary);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+// The command bar: one line, every control with four states.
+component CommandBar inherits Rectangle {
+    in property <bool> vision: false;
+    in property <bool> recording: false;
+    in property <bool> tts: true;
+    in property <bool> subtitles: true;
+    in property <bool> busy: false;
+    in-out property <string> draft: "";
+
+    callback send(string);
+    callback toggle-vision();
+    callback toggle-mic();
+    callback toggle-tts();
+    callback toggle-subtitles();
+    callback open-studio();
+    callback collapse();
+
+    height: 40px;
+    border-radius: Theme.r-md;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: field.has-focus ? Accent.edge : Theme.hairline;
+
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        spacing: 2px;
+        alignment: start;
+
+        RoundButton { icon: Glyph.eye; active: root.vision; activated => { root.toggle-vision(); } }
+        RoundButton { icon: Glyph.mic; active: root.recording; danger: root.recording; activated => { root.toggle-mic(); } }
+        RoundButton { icon: root.tts ? Glyph.speaker : Glyph.speaker-off; active: root.tts; activated => { root.toggle-tts(); } }
+        RoundButton { icon: Glyph.bubble; active: root.subtitles; activated => { root.toggle-subtitles(); } }
+        RoundButton { icon: Glyph.sliders; activated => { root.open-studio(); } }
+
+        field := TextInput {
+            width: parent.width - 28px * 6 - 12px;
+            height: parent.height - 10px;
+            vertical-alignment: center;
+            text: root.draft;
+            font-size: 12.5px;
+            font-family: Theme.font-ui;
+            color: Theme.text;
+            single-line: true;
+            enabled: !root.busy;
+            edited => { root.draft = field.text; }
+            accepted => {
+                if (root.draft != "") {
+                    root.send(root.draft);
+                    root.draft = "";
+                }
+            }
+        }
+
+        RoundButton {
+            icon: Glyph.plus;
+            active: root.draft != "";
+            enabled: !root.busy;
+            activated => {
+                if (root.draft != "") {
+                    root.send(root.draft);
+                    root.draft = "";
+                }
+            }
+        }
+        RoundButton { icon: Glyph.close; activated => { root.collapse(); } }
+    }
+
+    Text {
+        x: 177px;
+        y: 0;
+        height: parent.height;
+        width: parent.width - 195px;
+        text: root.busy ? "Aria is thinking…" : "Ask Aria anything…";
+        color: Theme.text-muted;
+        font-size: 12.5px;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        visible: root.draft == "";
+    }
+}
+
+// Collapsed pill.
+component Capsule inherits Rectangle {
+    in property <string> status: "Standing by";
+    in property <string> persona: "TSUNDERE";
+    in property <bool> listening: false;
+    callback expand();
+    callback mic();
+
+    height: 30px;
+    width: Math.max(180px, 76px + persona-label.preferred-width + status-label.preferred-width);
+    border-radius: Theme.r-pill;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: hover.has-hover ? Theme.hairline-strong : Theme.hairline;
+
+    HorizontalLayout {
+        padding-left: 11px;
+        padding-right: 6px;
+        padding-top: 5px;
+        padding-bottom: 5px;
+        spacing: 7px;
+        alignment: start;
+
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.listening ? Theme.danger : Theme.accent;
+        }
+
+        persona-label := Text {
+            text: root.persona;
+            color: Theme.text-muted;
+            font-size: 9.5px;
+            font-weight: 700;
+            letter-spacing: 0.7px;
+            vertical-alignment: center;
+        }
+
+        status-label := Text {
+            text: root.status;
+            color: Theme.text-secondary;
+            font-size: 11.5px;
+            font-family: Theme.font-ui;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: mic-hit.has-hover ? Accent.wash : transparent;
+            border-width: 1px;
+            border-color: mic-hit.has-hover ? Accent.edge : transparent;
+
+            Icon {
+                d: Glyph.mic;
+                size: 12px;
+                tint: mic-hit.has-hover ? Theme.accent : Theme.text-secondary;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+            mic-hit := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.mic(); }
+            }
+        }
+    }
+
+    hover := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.expand(); }
+    }
+}
+
+export component MascotWindow inherits Window {
+    title: "Aria";
+    background: transparent;
+
+    // Stage slot: Rust reads these to place the WebView2 child window.
+    in-out property <length> stage-w: 260px;
+    in-out property <length> stage-h: 370px;
+    out property <length> stage-x: (root.width - root.stage-w) / 2;
+    out property <length> stage-y: root.bubble-slot-height;
+
+    in property <bool> bar-visible: true;
+    in property <bool> capsule-mode: true;
+    in property <bool> subtitles: true;
+    in property <bool> tts: true;
+    in property <bool> vision: false;
+    in property <bool> recording: false;
+    in property <bool> busy: false;
+    in property <bool> peeking: false;
+    in-out property <string> draft: "";
+
+    in-out property <string> bubble-text: "";
+    in property <bool> bubble-shown: false;
+    in property <string> status-line: "Standing by";
+
+    in-out property <color> accent-color: #38bdf8;
+    in-out property <color> accent-wash: #12232c;
+    in-out property <color> accent-edge: #1f5f7a;
+    in-out property <string> persona-badge: "TSUNDERE";
+    in-out property <string> persona-name: "Tsundere";
+
+    callback send-text(string);
+    callback toggle-vision();
+    callback toggle-mic();
+    callback toggle-tts();
+    callback toggle-subtitles();
+    callback open-studio();
+    callback collapse-bar();
+    callback expand-bar();
+    callback open-quick-dial();
+    callback context-menu(Point);
+
+    width: root.stage-w + 24px;
+    height: root.stage-h + root.bubble-slot-height + chrome-height + 10px;
+
+    out property <length> bubble-slot-height: root.subtitles && root.bubble-shown ? bubble-view.height + 8px : 0px;
+    out property <length> chrome-height: root.bar-visible || !root.capsule-mode ? 44px : 34px;
+
+    changed accent-color => { Theme.accent = root.accent-color; }
+    changed accent-wash => { Accent.wash = root.accent-wash; }
+    changed accent-edge => { Accent.edge = root.accent-edge; }
+
+    VerticalLayout {
+        padding: 0;
+        spacing: 0;
+        alignment: start;
+
+        // Speech bubble above her head.
+        Rectangle {
+            height: root.bubble-slot-height;
+            width: parent.width;
+            background: transparent;
+            visible: root.subtitles && root.bubble-shown;
+
+            bubble-view := SpeechBubble {
+                x: (parent.width - self.width) / 2;
+                y: 0;
+                text: root.bubble-text;
+                measure: root.stage-w;
+            }
+        }
+
+        // The avatar stage slot; the WebView2 child renders into this rectangle.
+        Rectangle {
+            width: root.stage-w;
+            height: root.stage-h;
+            background: transparent;
+
+            // Hairline edge shown while docked to a bezel.
+            Rectangle {
+                width: 1.5px;
+                height: parent.height * 0.62;
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                background: Accent.edge;
+                visible: root.peeking;
+            }
+        }
+
+        // Command chrome.
+        Rectangle {
+            width: parent.width;
+            height: root.chrome-height;
+            background: transparent;
+
+            CommandBar {
+                x: (parent.width - self.width) / 2;
+                y: 2px;
+                width: root.stage-w;
+                draft <=> root.draft;
+                vision: root.vision;
+                recording: root.recording;
+                tts: root.tts;
+                subtitles: root.subtitles;
+                busy: root.busy;
+                send(text) => { root.send-text(text); }
+                toggle-vision => { root.toggle-vision(); }
+                toggle-mic => { root.toggle-mic(); }
+                toggle-tts => { root.toggle-tts(); }
+                toggle-subtitles => { root.toggle-subtitles(); }
+                open-studio => { root.open-studio(); }
+                collapse => { root.collapse-bar(); }
+                visible: root.bar-visible || !root.capsule-mode;
+            }
+
+            Capsule {
+                x: (parent.width - self.width) / 2;
+                y: 2px;
+                width: root.stage-w;
+                persona: root.persona-badge;
+                status: root.status-line;
+                listening: root.recording;
+                expand => { root.expand-bar(); }
+                mic => { root.toggle-mic(); }
+                visible: !root.bar-visible && root.capsule-mode;
+            }
+        }
+    }
+
+    // Double-clicking her frame opens the action ring; right-click opens the menu.
+    TouchArea {
+        x: 0;
+        y: root.stage-y;
+        width: root.width;
+        height: root.stage-h;
+        mouse-cursor: default;
+        double-clicked => { root.open-quick-dial(); }
+    }
+}

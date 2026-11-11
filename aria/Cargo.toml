@@ -1,0 +1,55 @@
+﻿[package]
+name = "aria"
+version = "6.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Aria - autonomous desktop companion (Rust + Slint port)"
+
+[dependencies]
+slint = { version = "1.18", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-femtovg",
+  "compat-1-18",
+  "unstable-winit-030",
+] }
+wry = { version = "0.57", default-features = false }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+rand = "0.9"
+log = "0.4"
+
+msedge-tts = { path = "../vendor/msedge-tts", default-features = false, features = ["blocking"] }
+tiny_http = "0.12"
+ureq = { version = "3", features = ["json"] }
+rodio = { version = "0.23", default-features = false, features = [
+  "playback",
+  "symphonia-mp3",
+  "symphonia-wav",
+] }
+cpal = "0.18"
+wasapi = "0.27"
+sysinfo = "0.40"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Threading",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Console",
+  "Win32_System_Registry",
+  "Win32_System_Time",
+  "Win32_Media_Audio",
+] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rfd = "0.18"
+arboard = "3"
+global-hotkey = "0.10"
+md5 = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[build-dependencies]
+slint-build = "1.18"
