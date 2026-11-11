@@ -108,6 +108,60 @@ Done.
 
 ---
 
+## Phase 3 — Avatar renderer spike
+
+Done, with the **layered-window fallback** (the swap-chain path is impossible on this stack).
+
+### Why the fallback was required
+
+`wgpu-hal` reports `composite_alpha_modes: vec![Opaque]` for any plain Win32 HWND
+(`wgpu-hal-30.0.1/src/dx12/adapter.rs`; the Vulkan backend matches). A Bevy swap chain therefore
+**cannot** composite over the desktop, whatever `composite_alpha_mode`, `transparent: true` or
+`ClearColor::NONE` say. Verified directly: Vulkan rejects `PreMultiplied`, and DX12 stays opaque
+black over the desktop.
+
+### What was built
+
+- `aria-avatar` crate: **headless Bevy 0.20 + `bevy_vrm1` 0.11**, no `WinitPlugin`, no swap chain.
+  The scene renders into an RGBA8 `Image` (`Image::new_target_texture`), is captured through
+  `Screenshot::image`, and is presented with `UpdateLayeredWindow` as premultiplied BGRA.
+- The window lives on its **own thread with a real message loop**. `UpdateLayeredWindow` sends
+  synchronous messages to the window's owner thread; with nobody pumping that queue the call
+  deadlocks. That is exactly what happened on the first attempts: the process sat blocked,
+  `Not Responding`, with no frames presented.
+- The camera receives `RenderTarget::Image` in the *same* system that spawns it. Attaching it from
+  a separate `Startup` system silently matched nothing, because `commands.spawn` is invisible to
+  other systems until deferred commands are applied.
+- Model loading uses an absolute path with `UnapprovedPathMode::Allow`, needed for arbitrary
+  `custom_vrm_path` values, and an asset root resolved exe-first then `aria-avatar/assets`.
+- Window: 520x740 physical px, layered, frameless, `WS_EX_TOOLWINDOW` (no taskbar or Alt-Tab),
+  always-on-top. The main app owns its geometry via `SetWindowPos` on the HWND it reports.
+
+### Custom model check
+
+`C:/Users/Aki/Downloads/vrms/freepurplecozytuberfixedshoes.vrm` (17.0 MB) parses as `"VRMC_vrm"`,
+so it is **VRM 1.0**. No conversion needed, and no VRM 0.x support was added.
+
+### Measured
+
+| Metric | Value |
+|---|---|
+| Backend / adapter | Vulkan / NVIDIA GTX 1060 (Dx12 also works) |
+| Alpha path | layered window, premultiplied BGRA |
+| Working set after 60 s | ~529 MB |
+| CPU over 60 s | 28.3 s (roughly half of one core at 30 FPS) |
+| Frame pace | 30 FPS (explicit pacing; headless has no vsync) |
+| Stability | 60 s continuous, no panic |
+
+Screenshot: `docs\screenshots\phase3-final-proof.png`, the avatar over a live desktop with desktop
+text visible through the gaps around the model.
+
+Deliberately still missing (they are Phase 5): emotion expressions, lip-sync, bone posing,
+gestures, click-through, props and lighting presets. Blink, look-at, spring bones, MToon shading
+and node constraints already come from `bevy_vrm1`.
+
+---
+
 ## Next
 
-Phase 3 — Bevy + `bevy_vrm1` standalone transparent avatar window.
+Phase 4 — `aria-protocol`, `AvatarLink` supervision and the window split.

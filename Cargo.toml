@@ -1,6 +1,8 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
-members = ["aria"]
+members = ["aria", "aria-avatar", "aria-protocol"]
+# The vendored msedge-tts is a patched dependency, not one of our crates.
+exclude = ["vendor/msedge-tts"]
 
 [profile.dev]
 opt-level = 1

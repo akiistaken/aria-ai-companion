@@ -1,0 +1,24 @@
+2026-11-11T10:55:15.755530Z  INFO bevy_diagnostic::system_information_diagnostics_plugin::internal: SystemInfo { os: "Windows 10 IoT Enterprise LTSC 2021", kernel: "19044", cpu: "Intel(R) Core(TM) i7-7700HQ CPU @ 2.80GHz", core_count: "4", memory: "15.9 GiB" }
+2026-11-11T10:55:16.318916Z  INFO bevy_render::renderer: AdapterInfo { name: "NVIDIA GeForce GTX 1060", vendor: 4318, device: 7200, device_type: DiscreteGpu, device_pci_bus_id: "0000:01:00.0", driver: "NVIDIA", driver_info: "582.78", backend: Vulkan, subgroup_min_size: 32, subgroup_max_size: 32, transient_saves_memory: Some(false), limit_bucket: None }
+2026-11-11T10:55:16.594710Z  INFO aria_avatar::link: avatar running standalone (no --port given)
+2026-11-11T10:55:16.595977Z  INFO bevy_pbr::cluster: GPU clustering is supported on this device.
+2026-11-11T10:55:16.596310Z  INFO bevy_render::batching::gpu_preprocessing: GPU preprocessing is fully supported on this device.
+2026-11-11T10:55:16.599391Z  INFO aria_avatar: setup_layered: creating the avatar window
+2026-11-11T10:55:16.599819Z  INFO aria_avatar: layered surface created
+2026-11-11T10:55:16.600183Z  INFO aria_avatar: camera rendering into the offscreen target
+2026-11-11T10:55:16.606221Z  INFO aria_avatar::behaviors: loading avatar model C:\Users\Aki\Documents\Backup\Aria\assets\models\aria_default.vrm
+2026-11-11T10:55:16.606427Z  INFO aria_avatar::layered: layered window ready (hwnd=1641178)
+2026-11-11T10:55:16.606603Z  INFO aria_avatar::present: capture request #1
+2026-11-11T10:55:17.272860Z  INFO aria_avatar::present: first frame 520x740 Rgba8UnormSrgb
+2026-11-11T10:55:17.273287Z  INFO aria_avatar::present: frame #1: 520x740 nonzero_alpha_pixels=0 of 384800
+2026-11-11T10:55:17.273393Z  INFO aria_avatar::present: first frame: 520x740 bytes=1539200 corner_alpha=0 centre_alpha=0 fmt=Rgba8UnormSrgb
+2026-11-11T10:55:17.274122Z  INFO aria_avatar::present: capture request #2
+2026-11-11T10:55:17.679024Z  INFO aria_avatar::present: frame #2: 520x740 nonzero_alpha_pixels=0 of 384800
+2026-11-11T10:55:17.747194Z  INFO aria_avatar::present: frame #3: 520x740 nonzero_alpha_pixels=36184 of 384800
+2026-11-11T10:55:37.948197Z  INFO aria_avatar::present: capture request #300
+2026-11-11T10:55:58.395734Z  INFO aria_avatar::present: capture request #600
+2026-11-11T10:56:19.160743Z  INFO aria_avatar::present: capture request #900
+2026-11-11T10:56:39.899612Z  INFO aria_avatar::present: capture request #1200
+2026-11-11T10:57:00.370894Z  INFO aria_avatar::present: capture request #1500
+2026-11-11T10:57:21.008833Z  INFO aria_avatar::present: capture request #1800
+2026-11-11T10:57:41.589162Z  INFO aria_avatar::present: capture request #2100
