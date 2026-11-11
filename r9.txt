@@ -1,1 +1,0 @@
-[aria] avatar renderer ready, hwnd=527404
