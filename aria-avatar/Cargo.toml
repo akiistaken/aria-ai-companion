@@ -30,6 +30,7 @@ bevy = { version = "0.20", default-features = false, features = [
   "zstd_rust",
   "multi_threaded",
   "std",
+  "debug",
   "default_app",
   "default_platform",
 ] }

@@ -226,6 +226,16 @@ pub fn cursor_position() -> (i32, i32) {
     (p.x, p.y)
 }
 
+/// True while the left mouse button is held.
+///
+/// The avatar window is layered and gets no input events, so the app polls the global button state
+/// and forwards it.
+pub fn primary_button_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+    // The high bit means "currently down".
+    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

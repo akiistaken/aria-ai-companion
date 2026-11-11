@@ -559,6 +559,33 @@ pub fn move_and_size_window(hwnd: isize, x: i32, y: i32, width: i32, height: i32
     }
 }
 
+/// Enables or disables click-through on the avatar window.
+///
+/// `WS_EX_TRANSPARENT` makes the window let mouse input fall through to whatever is beneath it,
+/// which is what turns the empty space around the model into normal desktop.
+pub fn set_click_through(hwnd: isize, enabled: bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    };
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let handle = HWND(hwnd as *mut _);
+        let style = GetWindowLongW(handle, GWL_EXSTYLE);
+        let transparent = WS_EX_TRANSPARENT.0 as i32;
+        let layered = WS_EX_LAYERED.0 as i32;
+        let updated = if enabled {
+            style | transparent | layered
+        } else {
+            style & !transparent
+        };
+        if updated != style {
+            SetWindowLongW(handle, GWL_EXSTYLE, updated);
+        }
+    }
+}
+
 /// Puts a child process in a job object that kills it when this process dies.
 ///
 /// The handle is deliberately leaked: the job must stay open for the lifetime of the app, and

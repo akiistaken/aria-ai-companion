@@ -1,4 +1,4 @@
-﻿//! Avatar behaviour: model loading, camera framing, expressions, blink, lip-sync, idle posing.
+//! Avatar behaviour: model loading, camera framing, expressions, blink, lip-sync, idle posing.
 //!
 //! The numeric tuning values (framing distances, blink timing, breathing amplitudes) are ported
 //! from the WebView reference at `docs/reference/vtuber_stage.html` and must stay in sync with it.
@@ -10,6 +10,13 @@ use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 
 
+
+/// A cursor sample forwarded from the main app.
+#[derive(Debug, Clone, Copy)]
+pub struct PointerSample {
+    pub position: Vec2,
+    pub pressed: bool,
+}
 
 /// Everything the main app can influence.
 #[derive(Resource)]
@@ -53,6 +60,17 @@ pub struct AvatarState {
     pub loaded_any: bool,
     /// Model requested on the command line (standalone runs).
     pub initial_model: String,
+
+    /// Latest cursor sample forwarded by the app.
+    pub pointer: Option<PointerSample>,
+    /// The model's projected screen bounds, for hit-testing and click-through.
+    pub screen_bounds: Option<(Vec2, Vec2)>,
+    /// Last reported hover state, so changes are only sent once.
+    pub last_over_model: bool,
+    /// Whether clicks currently pass through to the desktop.
+    pub click_through: bool,
+    /// Resolved bone entities and their rest rotations, cached per model.
+    pub bones: Option<crate::posing::VrmBones>,
 }
 
 impl Default for AvatarState {
@@ -92,6 +110,11 @@ impl Default for AvatarState {
             loaded_any: false,
             initial_model: String::new(),
             pending_model: None,
+            pointer: None,
+            screen_bounds: None,
+            last_over_model: false,
+            click_through: false,
+            bones: None,
         }
     }
 }
@@ -169,8 +192,29 @@ pub fn animate(
     asset_server: Res<AssetServer>,
     mut link: ResMut<crate::link::AvatarLink>,
     vrms: Query<(Entity, Option<&Vrm>), With<VrmHandle>>,
-    mut cameras: Query<&mut Transform, (With<AvatarCamera>, Without<LookTarget>)>,
-    mut look_targets: Query<&mut Transform, With<LookTarget>>,
+    bone_query: Query<(
+        Option<&SpineBoneEntity>,
+        Option<&ChestBoneEntity>,
+        Option<&NeckBoneEntity>,
+        Option<&HeadBoneEntity>,
+        Option<&HipsBoneEntity>,
+        Option<&LeftUpperArmBoneEntity>,
+        Option<&RightUpperArmBoneEntity>,
+        Option<&LeftLowerArmBoneEntity>,
+        Option<&RightLowerArmBoneEntity>,
+        Option<&LeftUpperLegBoneEntity>,
+        Option<&RightUpperLegBoneEntity>,
+        Option<&LeftLowerLegBoneEntity>,
+        Option<&RightLowerLegBoneEntity>,
+    )>,
+    // Every `Transform` mutation lives in one ParamSet, so Bevy cannot see two of them as
+    // potentially overlapping borrows.
+    mut parts: ParamSet<(
+        Query<&mut Transform, (With<AvatarCamera>, Without<LookTarget>, Without<Vrm>)>,
+        Query<&mut Transform, (With<LookTarget>, Without<AvatarCamera>, Without<Vrm>)>,
+        Query<&mut Transform, (Without<Vrm>, Without<AvatarCamera>, Without<LookTarget>)>,
+        Query<&mut Transform, With<Vrm>>,
+    )>,
 ) {
     let dt = time.delta_secs().min(0.1);
 
@@ -220,19 +264,36 @@ pub fn animate(
 
     // ---- Breathing --------------------------------------------------------------------
     state.breath += dt;
-    let _breath = (state.breath * 1.6).sin() * 0.012;
+    let breath = (state.breath * 1.6).sin();
+    // Slow lateral sway, independent of breathing so the two do not lock in phase.
+    let sway = (state.breath * 0.55).sin();
 
     // ---- Look target ------------------------------------------------------------------
-    for mut transform in look_targets.iter_mut() {
+    {
+        let mut look_targets = parts.p1();
+        for mut transform in look_targets.iter_mut() {
         transform.translation.x = state.smoothed_look_x * 0.85;
         transform.translation.y = 1.25 + state.smoothed_look_y * 0.55;
         transform.translation.z = -1.0;
+        }
     }
 
     // ---- Camera framing ---------------------------------------------------------------
-    if let Ok(mut camera) = cameras.single_mut() {
-        frame_camera(&state, &mut camera);
+    {
+        let mut cameras = parts.p0();
+        if let Ok(mut camera) = cameras.single_mut() {
+            frame_camera(&state, &mut camera);
+        }
     }
+    // The model occupies the middle of the frame; its projected bounds are approximated from the
+    // camera distance and the model height. Refining this to a true bone-box projection is a
+    // documented follow-up.
+    let half_w = crate::WINDOW_W * 0.30;
+    let half_h = crate::WINDOW_H * 0.42;
+    state.screen_bounds = Some((
+        Vec2::new(crate::WINDOW_W * 0.5 - half_w, crate::WINDOW_H * 0.5 - half_h),
+        Vec2::new(crate::WINDOW_W * 0.5 + half_w, crate::WINDOW_H * 0.5 + half_h),
+    ));
 
     // ---- Expressions ------------------------------------------------------------------
     let Some(root) = state.root else {
@@ -245,6 +306,43 @@ pub fn animate(
         }
         return;
     };
+
+    // ---- Bone posing ------------------------------------------------------------------
+    // Applied after animation and before spring bones settle, so hair follows the posed body
+    // instead of lagging a frame behind it.
+    let pose = crate::posing::pose_for(&state, time.elapsed_secs(), breath, sway);
+    // The bone map and its rest rotations are resolved once per model, not per frame: they are
+    // fixed for the life of the loaded rig.
+    if state.bones.is_none() {
+        let mut resolved = crate::posing::read_bones(root, &bone_query);
+        if resolved.entity_for(root, "spine").is_some() {
+            // Capture the rig's own rest rotations before the first pose is applied, so poses
+            // compose onto the T-pose instead of replacing it.
+            let mut transforms = parts.p2();
+            let pairs: Vec<(&'static str, Entity)> = resolved.iter().collect();
+            for (name, entity) in pairs {
+                if let Ok(transform) = transforms.get_mut(entity) {
+                    resolved.rest.insert(name, transform.rotation);
+                }
+            }
+            log::info!("bone map resolved ({} bones)", resolved.rest.len());
+            state.bones = Some(resolved);
+        }
+    }
+    if let Some(bones) = state.bones.clone() {
+        let mut transforms = parts.p2();
+        crate::posing::apply_pose(root, &pose, &bones, &mut transforms);
+    }
+
+    // Body yaw, peeking lean and drag inertia ride on the model root's own rotation.
+    {
+        let mut bodies = parts.p3();
+        if let Ok(mut body) = bodies.get_mut(root) {
+            let current_yaw = body.rotation.to_euler(EulerRot::YXZ).0;
+            let wanted = crate::posing::body_rotation(&state, time.elapsed_secs(), current_yaw, dt);
+            body.rotation = Quat::from_euler(EulerRot::YXZ, wanted.y, wanted.x, wanted.z);
+        }
+    }
 
     let emotion = state.emotion.clone();
     // `SetExpressions` replaces every override, so the full set is sent each change.

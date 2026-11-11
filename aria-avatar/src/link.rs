@@ -268,6 +268,13 @@ pub fn pump_link(
                 state.y_offset = y_offset;
             }
             Command::SetFps { fps } => state.fps = fps.max(1).min(120),
+            Command::SetPointer { x, y, pressed } => {
+                state.pointer = Some(crate::behaviors::PointerSample {
+                    position: Vec2::new(x, y),
+                    pressed,
+                });
+            }
+            Command::SetClickThrough { enabled } => state.click_through = enabled,
             Command::Shutdown => {
                 commands.write_message(AppExit::Success);
             }

@@ -9,8 +9,12 @@
 mod behaviors;
 #[path = "layered.rs"]
 mod layered;
+#[path = "input.rs"]
+mod input;
 #[path = "link.rs"]
 mod link;
+#[path = "posing.rs"]
+mod posing;
 #[path = "present.rs"]
 mod present;
 
@@ -83,6 +87,7 @@ fn main() {
     })
     .init_resource::<present::Presenter>()
     .init_resource::<present::LatestFrame>()
+    .init_resource::<input::GestureState>()
     .insert_resource(AvatarLink::new(args))
     .set_runner(run_loop)
     .add_systems(
@@ -96,6 +101,7 @@ fn main() {
             link::announce_ready,
             link::pump_link,
             behaviors::animate,
+            input::track_pointer,
             present::present_latest,
             present::request_capture,
         )

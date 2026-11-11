@@ -237,6 +237,21 @@ impl AvatarLink {
         self.send(Command::SetFps { fps });
     }
 
+    /// Forwards one cursor sample. The avatar window is layered and receives no input itself.
+    pub fn set_pointer(&self, x: f32, y: f32, pressed: bool) {
+        self.send(Command::SetPointer { x, y, pressed });
+    }
+
+    /// Enables or disables click-through, so empty areas of the avatar window pass clicks on.
+    pub fn set_click_through(&self, enabled: bool) {
+        let hwnd = self.hwnd();
+        if hwnd == 0 {
+            return;
+        }
+        crate::win32::set_click_through(hwnd as isize, enabled);
+        self.send(Command::SetClickThrough { enabled });
+    }
+
     pub fn load_model(&self, path: &str) {
         self.send(Command::LoadModel {
             path: path.to_string(),

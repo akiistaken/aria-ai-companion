@@ -68,6 +68,17 @@ pub enum Command {
     },
     /// 30 normal, 10 in game mode, 0 = paused.
     SetFps { fps: u32 },
+    /// The window got or lost primary-button focus, forwarded from the app.
+    ///
+    /// The avatar window is layered and gets no input of its own, so the app feeds it the global
+    /// cursor position and button state.
+    SetPointer {
+        x: f32,
+        y: f32,
+        pressed: bool,
+    },
+    /// Whether clicks should reach the desktop: false over empty space.
+    SetClickThrough { enabled: bool },
     Shutdown,
 }
 
@@ -95,6 +106,8 @@ pub enum Event {
     Headpat,
     MiddleClick,
     ContextMenu,
+    /// The cursor moved on or off the model, so the app can toggle click-through.
+    HoverChanged { over: bool },
     Error { msg: String },
 }
 
