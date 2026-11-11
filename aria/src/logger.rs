@@ -44,6 +44,11 @@ impl log::Log for Logger {
             record.target(),
             record.args()
         );
+        // Debug builds run with a console; mirror the log there so a dev run is readable (and
+        // redirectable) even when the data directory is not writable.
+        if cfg!(debug_assertions) {
+            eprint!("{line}");
+        }
         if let Some(file) = self
             .file
             .lock()

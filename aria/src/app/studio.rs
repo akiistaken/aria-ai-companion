@@ -1,4 +1,4 @@
-﻿//! Control Center wiring: pushes live state into the studio and handles every control.
+//! Control Center wiring: pushes live state into the studio and handles every control.
 //!
 //! Callbacks run on the UI thread and reach the app through `post`, so no closure captures a
 //! Slint component or the app handle.
@@ -76,7 +76,7 @@ fn mask_key(key: &str) -> String {
             .into_iter()
             .rev()
             .collect();
-        format!("{start}ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦{end}")
+        format!("{start}…{end}")
     } else {
         key.to_string()
     }
@@ -118,7 +118,7 @@ pub fn sync_studio(app: &AppHandle) {
                 icon: SharedString::from(e.icon),
                 title: SharedString::from(e.title),
                 tier: SharedString::from(e.tier),
-                level: SharedString::from(format!("Lv {} Ãƒâ€šÃ‚Â· {}/100", e.level, e.progress)),
+                level: SharedString::from(format!("Lv {} · {}/100", e.level, e.progress)),
                 percent: (e.progress as f32 / 100.0).clamp(0.0, 1.0),
                 color,
                 tint: lighten(color, 0.5),
@@ -278,7 +278,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_clone_voice_file, || {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Audio", &["mp3", "wav", "flac", "ogg"])
-            .set_title("Pick a 5ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“20 s clip of the voice to clone")
+            .set_title("Pick a 5–20 s clip of the voice to clone")
             .pick_file()
         {
             config::update(|s| {
@@ -287,7 +287,7 @@ pub fn wire_studio(studio: &ControlCenter) {
             with_app(|app| {
                 say(
                     app,
-                    &config::flav("Got your reference clip ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â I'll keep it for voice work."),
+                    &config::flav("Got your reference clip — I'll keep it for voice work."),
                     "happy",
                     vec![format!("reference clip: {}", path.display())],
                     false,
@@ -618,7 +618,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_add_todo, || {
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
-                s.set_status_text("Add tasks from the chat bar ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â say ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œtodo add ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â.".into());
+                s.set_status_text("Add tasks from the chat bar — say “todo add …”.".into());
             }
         });
     });

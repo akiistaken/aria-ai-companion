@@ -226,14 +226,23 @@ pub fn cursor_position() -> (i32, i32) {
     (p.x, p.y)
 }
 
-/// True while the left mouse button is held.
+/// `(left, right, middle)`: which mouse buttons are held right now.
 ///
 /// The avatar window is layered and gets no input events, so the app polls the global button state
-/// and forwards it.
-pub fn primary_button_down() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+/// and forwards it. Swapped buttons are honoured (`GetAsyncKeyState` reports physical buttons).
+pub fn mouse_buttons() -> (bool, bool, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
     // The high bit means "currently down".
-    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
+    let down = |vk: u16| unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 };
+    let (l, r, m) = (down(VK_LBUTTON.0), down(VK_RBUTTON.0), down(VK_MBUTTON.0));
+    if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 {
+        (r, l, m)
+    } else {
+        (l, r, m)
+    }
 }
 
 #[cfg(test)]

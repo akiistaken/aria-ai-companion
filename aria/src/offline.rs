@@ -28,7 +28,7 @@ pub fn answer(
     let lower = user_message.to_lowercase();
     let lower = lower.trim();
     let mut logs = vec![
-        "Offline mode â€” set an API key in the Control Center for full AI".to_string(),
+        "Offline mode — set an API key in the Control Center for full AI".to_string(),
     ];
 
     if lower.is_empty() {
@@ -654,7 +654,7 @@ pub fn answer(
 
     // 23. Fallback
     let snippet = crate::util::truncate(user_message.trim(), 40);
-    logs.push("Offline mode â€” set an API key in the Control Center for full AI".into());
+    logs.push("Offline mode — set an API key in the Control Center for full AI".into());
     let _ = include_screen;
     Reply::new(
         persona_line! {

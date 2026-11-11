@@ -13,7 +13,7 @@ use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use aria_protocol::{Command, Event, PeekSide};
+use aria_protocol::{Command, Event};
 use bevy::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -64,6 +64,9 @@ pub struct AvatarLink {
     pending: Arc<Mutex<VecDeque<Event>>>,
     connected: bool,
     token: String,
+    /// Test-only tap on the outgoing events.
+    #[cfg(test)]
+    sent: Mutex<Option<Receiver<Event>>>,
 }
 
 impl AvatarLink {
@@ -86,7 +89,34 @@ impl AvatarLink {
             pending,
             connected,
             token: args.token,
+            #[cfg(test)]
+            sent: Mutex::new(None),
         }
+    }
+
+    /// A connected link with no socket, whose events can be read back with [Self::drain_sent].
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        let (out_tx, out_rx) = mpsc::channel::<Event>();
+        let (_in_tx, in_rx) = mpsc::channel::<Command>();
+        Self {
+            commands: Mutex::new(in_rx),
+            outbox: out_tx,
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            connected: true,
+            token: String::new(),
+            sent: Mutex::new(Some(out_rx)),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn drain_sent(&self) -> Vec<Event> {
+        self.sent
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Marks the link usable and flushes anything queued before the socket existed.
@@ -115,9 +145,7 @@ impl AvatarLink {
             }
         }
     }
-    pub fn token(&self) -> &str {
-        &self.token
-    }
+
 }
 
 /// Connects, then owns both directions of the socket for the life of the process.
@@ -196,6 +224,11 @@ fn spawn_connection(
                                 std::process::exit(0);
                             }
                             Ok(command) => {
+                                // Moves skip the frame loop: the window thread applies them
+                                // within ~15 ms, so the avatar keeps pace with its chrome.
+                                if let Command::SetWindowRect { x, y, .. } = &command {
+                                    crate::layered::place(*x, *y);
+                                }
                                 if in_tx.send(command).is_err() {
                                     break;
                                 }
@@ -218,6 +251,7 @@ fn spawn_connection(
 pub fn pump_link(
     mut link: ResMut<AvatarLink>,
     mut state: ResMut<crate::behaviors::AvatarState>,
+    mut hearts: ResMut<crate::hearts::Hearts>,
     mut commands: Commands,
 ) {
     let drained: Vec<Command> = {
@@ -245,6 +279,7 @@ pub fn pump_link(
             Command::SetMouth { aa, oh } => {
                 state.mouth_aa = aa;
                 state.mouth_oh = oh;
+                state.mouth_age = 0.0;
             }
             Command::SetPeeking { side } => state.peeking = side,
             Command::SetMusicVibe { active, energy } => {
@@ -252,10 +287,13 @@ pub fn pump_link(
                 state.music_energy = energy;
             }
             Command::SetDragInertia { x, y } => {
-                state.inertia_x = x;
-                state.inertia_y = y;
+                state.target_inertia_x = x;
+                state.target_inertia_y = y;
             }
-            Command::TriggerHeadpat => state.headpat_at = Some(std::time::Instant::now()),
+            Command::TriggerHeadpat => {
+                state.headpat_active = 1.0;
+                hearts.burst();
+            }
             Command::SetProps { props } => state.props = props,
             Command::SetLighting { preset } => state.lighting = preset,
             Command::SetCameraFraming {
@@ -267,14 +305,28 @@ pub fn pump_link(
                 state.zoom = zoom;
                 state.y_offset = y_offset;
             }
-            Command::SetFps { fps } => state.fps = fps.max(1).min(120),
-            Command::SetPointer { x, y, pressed } => {
-                state.pointer = Some(crate::behaviors::PointerSample {
+            // 0 pauses; otherwise clamp to something a desktop pet can sensibly use.
+            Command::SetFps { fps } => state.fps = if fps == 0 { 0 } else { fps.clamp(5, 60) },
+            // The position was already applied by the socket thread; only the size matters here.
+            Command::SetWindowRect { width, height, .. } => {
+                state.viewport = (width.clamp(64, 2048), height.clamp(64, 2048));
+            }
+            Command::SetPointer {
+                x,
+                y,
+                pressed,
+                right,
+                middle,
+            } => {
+                state.pointer = Some(crate::input::PointerSample {
                     position: Vec2::new(x, y),
-                    pressed,
+                    left: pressed,
+                    right,
+                    middle,
                 });
             }
-            Command::SetClickThrough { enabled } => state.click_through = enabled,
+            // The app applies click-through to the window itself; nothing to do here.
+            Command::SetClickThrough { .. } => {}
             Command::Shutdown => {
                 commands.write_message(AppExit::Success);
             }
@@ -301,7 +353,3 @@ pub fn announce_ready(mut link: ResMut<AvatarLink>, mut done: Local<bool>) {
     });
     log::info!("announced Ready with hwnd={hwnd}");
 }
-
-/// Default `PeekSide` is used by the protocol; kept referenced for documentation value.
-#[allow(dead_code)]
-const _DEFAULT_PEEK: PeekSide = PeekSide::None;

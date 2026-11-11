@@ -1,4 +1,4 @@
-﻿//! The brain: OpenAI-compatible chat with tool calls, offline fallback, persona flavour,
+//! The brain: OpenAI-compatible chat with tool calls, offline fallback, persona flavour,
 //! and the media/dropped-file analyses.
 
 use serde_json::{json, Value};
@@ -543,7 +543,7 @@ impl Brain {
     }
 }
 
-/// "What do you hear?" â€” loopback capture plus optional model description.
+/// "What do you hear?" — loopback capture plus optional model description.
 pub fn listen_to_desktop_audio(seconds: f64, question: &str) -> Value {
     let activity = crate::audio::audio_activity(240);
     let (samples, levels) = crate::audio::capture_desktop_audio(seconds);
@@ -569,7 +569,7 @@ pub fn listen_to_desktop_audio(seconds: f64, question: &str) -> Value {
         if let Some(obj) = result.as_object_mut() {
             obj.insert(
                 "heard".into(),
-                json!("Silence â€” nothing is playing through the speakers right now."),
+                json!("Silence — nothing is playing through the speakers right now."),
             );
         }
         return result;

@@ -367,7 +367,7 @@ pub fn check_for_event() -> Option<ProactiveEvent> {
         return Some(ProactiveEvent {
             category: "hardware_spike".into(),
             message: persona_line! {
-                "tsundere" => format!("Look at your system resources â€” CPU is at {cpu}% and RAM is at {ram}%! Close some heavy apps before your PC overheats!"),
+                "tsundere" => format!("Look at your system resources — CPU is at {cpu}% and RAM is at {ram}%! Close some heavy apps before your PC overheats!"),
                 "yandere" => format!("Your CPU is at {cpu}% and RAM is at {ram}%! Close those heavy apps so nothing crashes our time together!"),
                 "tomboy" => format!("Heads up! Your CPU is hitting {cpu}% and RAM is at {ram}%! Let's close some heavy background tabs!"),
             },
@@ -386,7 +386,7 @@ pub fn check_for_event() -> Option<ProactiveEvent> {
                 message: persona_line! {
                     "tsundere" => format!("Your battery is down to {battery}% and unplugged! Plug in your charger before your PC shuts down!"),
                     "yandere" => format!("Your battery is at {battery}%! Plug in your charger right now so we don't get disconnected!"),
-                    "tomboy" => format!("Battery check! You're at {battery}% and unplugged â€” grab your charger before we lose power!"),
+                    "tomboy" => format!("Battery check! You're at {battery}% and unplugged — grab your charger before we lose power!"),
                 },
                 emotion: "annoyed".into(),
                 badge: format!("Low battery warning ({battery}%)"),
@@ -469,7 +469,7 @@ pub fn check_for_event() -> Option<ProactiveEvent> {
                         category: format!("gaming_praise_{}", st.game_praise_count),
                         message: line,
                         emotion: emotion.into(),
-                        badge: format!("Gaming motivation ({clean} â€¢ {session_mins}m)"),
+                        badge: format!("Gaming motivation ({clean} • {session_mins}m)"),
                         walk_location: walk,
                     });
                 }
@@ -527,7 +527,7 @@ pub fn check_for_event() -> Option<ProactiveEvent> {
         return Some(ProactiveEvent {
             category: "late_night".into(),
             message: persona_line! {
-                "tsundere" => format!("Do you realize it's {now_str}? Staying up this late is bad for you â€” wrap up and get some sleep soon!"),
+                "tsundere" => format!("Do you realize it's {now_str}? Staying up this late is bad for you — wrap up and get some sleep soon!"),
                 "yandere" => format!("It's already {now_str}... I love staying up late with you, but you need your rest too."),
                 "tomboy" => format!("Whoa, it's {now_str} already! Let's wrap this up and get some rest so you're fresh tomorrow!"),
             },
@@ -599,9 +599,9 @@ pub fn build_daily_briefing() -> (String, Vec<String>) {
     };
 
     let msg = persona_line! {
-        "tsundere" => format!("{tod}! It's {time_str} â€” CPU is at {cpu}%, RAM is at {ram}%{bat_phrase}. {todo_phrase}"),
-        "yandere" => format!("{tod}! It's {time_str} â€” I checked everything for you: CPU is {cpu}%, RAM is {ram}%{bat_phrase}. {todo_phrase}"),
-        "tomboy" => format!("{tod}! It's {time_str} â€” Systems are running at {cpu}% CPU and {ram}% RAM{bat_phrase}. {todo_phrase} Let's get after it!"),
+        "tsundere" => format!("{tod}! It's {time_str} — CPU is at {cpu}%, RAM is at {ram}%{bat_phrase}. {todo_phrase}"),
+        "yandere" => format!("{tod}! It's {time_str} — I checked everything for you: CPU is {cpu}%, RAM is {ram}%{bat_phrase}. {todo_phrase}"),
+        "tomboy" => format!("{tod}! It's {time_str} — Systems are running at {cpu}% CPU and {ram}% RAM{bat_phrase}. {todo_phrase} Let's get after it!"),
     };
 
     let logs = vec![format!(

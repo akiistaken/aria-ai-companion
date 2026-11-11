@@ -1,12 +1,14 @@
-//! Mouse input inside the avatar window, plus the gesture detectors.
+//! Mouse input for the avatar, plus the gesture detectors.
 //!
 //! Ported from `docs/reference/stage_bridge.js` with its tuning values kept exact: a head-pat needs
-//! four direction reversals inside 1.25 s with a 5 s cool-down, and a shake needs five reversals
-//! inside 0.85 s. Both require a minimum travel per step so a slow drift never counts.
+//! four direction reversals of at least 8 px inside 1.25 s with a 5 s cool-down; a shake needs five
+//! reversals of at least 12 px inside 0.85 s while dragging; a drag starts after 5 px of travel.
 //!
-//! The window is layered, so it receives no mouse input of its own. The main app sends this process
-//! the global cursor position and the button state; hit-testing against the model happens here,
-//! where the model's projected bounds are known.
+//! The window is layered and receives no mouse input of its own. The app forwards the global
+//! cursor position (relative to this window) and the button states every tick. Because those
+//! buttons are global, a gesture only starts from a press that lands **on the model** (judged by
+//! the last frame's alpha, see [`crate::present::HitMask`]); a press anywhere else on the desktop
+//! is ignored until it is released.
 
 use bevy::prelude::*;
 
@@ -14,158 +16,228 @@ use aria_protocol::Event;
 
 use crate::behaviors::AvatarState;
 use crate::link::AvatarLink;
+use crate::present::HitMask;
 
-/// Minimum horizontal travel, in pixels, for a step to count as part of a gesture.
-const STEP_PX: f32 = 8.0;
-/// Minimum travel for a drag step to register.
-const DRAG_STEP_PX: f32 = 5.0;
-/// Shake: reversals needed and the window they must fall inside.
+const DRAG_DEAD_ZONE: f32 = 5.0;
+const SHAKE_STEP: f32 = 12.0;
 const SHAKE_REVERSALS: usize = 5;
 const SHAKE_WINDOW: f32 = 0.85;
-/// Head pat: reversals needed, the window, and the cool-down.
+const HEADPAT_STEP: f32 = 8.0;
 const HEADPAT_REVERSALS: usize = 4;
 const HEADPAT_WINDOW: f32 = 1.25;
 const HEADPAT_COOLDOWN: f32 = 5.0;
+/// Windows' default double-click time and a small travel tolerance.
+const DOUBLE_CLICK_SECS: f32 = 0.5;
+const DOUBLE_CLICK_SLOP: f32 = 6.0;
+/// Hover tolerance around the model's silhouette, in pixels.
+const HIT_RADIUS: i32 = 3;
+
+/// One cursor sample forwarded from the main app.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PointerSample {
+    pub position: Vec2,
+    pub left: bool,
+    pub right: bool,
+    pub middle: bool,
+}
 
 /// Gesture state, owned by the avatar process.
 #[derive(Resource, Default)]
 pub struct GestureState {
-    cursor: Option<Vec2>,
+    clock: f32,
+    previous: PointerSample,
+    have_previous: bool,
+    /// A left press that started on the model: (start position, start time).
+    press: Option<(Vec2, f32)>,
+    dragging: bool,
     last_x: f32,
     last_y: f32,
-    dragging: bool,
-    drag_origin: Option<Vec2>,
-    /// Reversal timestamps for the shake detector.
-    shake_reversals: Vec<f32>,
     shake_dir: i32,
-    /// Reversal timestamps for the head-pat detector.
-    headpat_reversals: Vec<f32>,
+    shake_reversals: Vec<f32>,
+    /// Last click released without dragging, for double-click detection.
+    last_click: Option<(Vec2, f32)>,
+    headpat_x: Option<f32>,
     headpat_dir: i32,
+    headpat_reversals: Vec<f32>,
     last_headpat: f32,
-    clock: f32,
+    over_model: bool,
 }
 
 impl GestureState {
-    /// Feeds one cursor sample. `pressed` is the primary button state.
-    fn update(&mut self, cursor: Vec2, pressed: bool, dt: f32, link: &AvatarLink) {
+    fn update(&mut self, sample: PointerSample, over: bool, size: Vec2, dt: f32, link: &AvatarLink) {
         self.clock += dt;
-        let previous = self.cursor.replace(cursor);
+        let now = self.clock;
+        let prev = if self.have_previous { self.previous } else { sample };
+        self.have_previous = true;
+        self.previous = sample;
+        let pos = sample.position;
 
-        if previous.is_none() {
-            self.last_x = cursor.x;
-            self.last_y = cursor.y;
-            return;
+        if over != self.over_model {
+            self.over_model = over;
+            link.send(Event::HoverChanged { over });
         }
 
-        let step_x = cursor.x - self.last_x;
-
-        if !pressed {
-            self.detect_headpat(step_x, self.clock, cursor, link);
+        // ---- Right and middle buttons: on press, over the model only ----
+        if sample.right && !prev.right && over {
+            link.send(Event::ContextMenu);
+        }
+        if sample.middle && !prev.middle && over {
+            link.send(Event::MiddleClick);
         }
 
-        // Drag: press, then movement past a small dead zone.
-        if pressed {
-            if !self.dragging {
-                self.dragging = true;
-                self.drag_origin = Some(cursor);
-                self.last_x = cursor.x;
-                self.last_y = cursor.y;
-                link.send(Event::DragStart);
-            } else if let Some(origin) = self.drag_origin {
-                let travelled = (cursor - origin).abs();
-                if travelled.x + travelled.y > DRAG_STEP_PX {
+        // ---- Head-pat: scrubbing back and forth across the head band, no button held ----
+        let in_band = pos.y >= 0.0
+            && pos.y < size.y * 0.4
+            && (pos.x - size.x * 0.5).abs() < size.x * 0.36
+            && over;
+        if in_band && !sample.left {
+            if let Some(last_x) = self.headpat_x {
+                let step = pos.x - last_x;
+                if step.abs() >= HEADPAT_STEP {
+                    let dir = if step > 0.0 { 1 } else { -1 };
+                    if self.headpat_dir != 0 && dir != self.headpat_dir {
+                        self.headpat_reversals.retain(|t| now - t <= HEADPAT_WINDOW);
+                        self.headpat_reversals.push(now);
+                        if self.headpat_reversals.len() >= HEADPAT_REVERSALS
+                            && now - self.last_headpat > HEADPAT_COOLDOWN
+                        {
+                            self.headpat_reversals.clear();
+                            self.last_headpat = now;
+                            link.send(Event::Headpat);
+                        }
+                    }
+                    self.headpat_dir = dir;
+                    self.headpat_x = Some(pos.x);
+                }
+            } else {
+                self.headpat_x = Some(pos.x);
+            }
+        } else {
+            self.headpat_x = None;
+            self.headpat_dir = 0;
+            self.headpat_reversals.clear();
+        }
+
+        // ---- Left button: press on the model, then drag / click / double-click ----
+        if sample.left && !prev.left {
+            if over {
+                self.press = Some((pos, now));
+                self.last_x = pos.x;
+                self.last_y = pos.y;
+                self.shake_dir = 0;
+                self.shake_reversals.clear();
+            }
+        } else if sample.left {
+            if let Some((origin, _)) = self.press {
+                let travel = (pos - origin).abs();
+                if !self.dragging && travel.x + travel.y > DRAG_DEAD_ZONE {
+                    self.dragging = true;
+                    link.send(Event::DragStart);
+                }
+                if self.dragging && (pos.x != self.last_x || pos.y != self.last_y) {
+                    let step_x = pos.x - self.last_x;
+                    let step_y = pos.y - self.last_y;
                     link.send(Event::DragMove);
-                    let step_y = cursor.y - self.last_y;
                     link.send(Event::DragInertia {
                         x: (step_x / 16.0).clamp(-1.0, 1.0),
                         y: (step_y / 16.0).clamp(-1.0, 1.0),
                     });
-                    self.detect_shake(step_x, self.clock, link);
+                    if step_x.abs() >= SHAKE_STEP {
+                        let dir = if step_x > 0.0 { 1 } else { -1 };
+                        if self.shake_dir != 0 && dir != self.shake_dir {
+                            self.shake_reversals.retain(|t| now - t <= SHAKE_WINDOW);
+                            self.shake_reversals.push(now);
+                            if self.shake_reversals.len() >= SHAKE_REVERSALS {
+                                self.shake_reversals.clear();
+                                link.send(Event::Shake);
+                            }
+                        }
+                        self.shake_dir = dir;
+                    }
+                    self.last_x = pos.x;
+                    self.last_y = pos.y;
                 }
             }
-        } else if self.dragging {
+        } else if prev.left {
+            // Release.
+            if self.dragging {
+                link.send(Event::DragEnd);
+            } else if let Some((origin, _)) = self.press {
+                match self.last_click {
+                    Some((at, when))
+                        if now - when <= DOUBLE_CLICK_SECS
+                            && at.distance(origin) <= DOUBLE_CLICK_SLOP =>
+                    {
+                        self.last_click = None;
+                        link.send(Event::Poke);
+                    }
+                    _ => self.last_click = Some((origin, now)),
+                }
+            }
             self.dragging = false;
-            self.drag_origin = None;
-            self.shake_reversals.clear();
-            self.shake_dir = 0;
-            link.send(Event::DragEnd);
+            self.press = None;
         }
-
-        self.last_x = cursor.x;
-        self.last_y = cursor.y;
-    }
-
-    fn detect_shake(&mut self, step_x: f32, now: f32, link: &AvatarLink) {
-        if step_x.abs() < 12.0 {
-            return;
-        }
-        let dir = if step_x > 0.0 { 1 } else { -1 };
-        if self.shake_dir != 0 && dir != self.shake_dir {
-            self.shake_reversals
-                .retain(|t| now - t <= SHAKE_WINDOW);
-            self.shake_reversals.push(now);
-            if self.shake_reversals.len() >= SHAKE_REVERSALS {
-                self.shake_reversals.clear();
-                link.send(Event::Shake);
-            }
-        }
-        self.shake_dir = dir;
-    }
-
-    fn detect_headpat(&mut self, step_x: f32, now: f32, cursor: Vec2, link: &AvatarLink) {
-        // The head band is the upper 40% of the window, horizontally centred.
-        let in_band = cursor.y < crate::WINDOW_H * 0.4
-            && (cursor.x - crate::WINDOW_W * 0.5).abs() < crate::WINDOW_W * 0.36;
-        if !in_band {
-            self.headpat_reversals.clear();
-            self.headpat_dir = 0;
-            return;
-        }
-        if step_x.abs() < STEP_PX {
-            return;
-        }
-        let dir = if step_x > 0.0 { 1 } else { -1 };
-        if self.headpat_dir != 0 && dir != self.headpat_dir {
-            self.headpat_reversals
-                .retain(|t| now - t <= HEADPAT_WINDOW);
-            self.headpat_reversals.push(now);
-            if self.headpat_reversals.len() >= HEADPAT_REVERSALS
-                && now - self.last_headpat > HEADPAT_COOLDOWN
-            {
-                self.headpat_reversals.clear();
-                self.last_headpat = now;
-                link.send(Event::Headpat);
-            }
-        }
-        self.headpat_dir = dir;
     }
 }
 
-/// True when the cursor is over the model, judged by its projected screen bounds.
-///
-/// Click-through depends on this: the main app toggles hit-testing so clicks in the empty area of
-/// the window reach the desktop.
-pub fn over_model(state: &AvatarState, cursor: Vec2) -> bool {
-    let Some((min, max)) = state.screen_bounds else {
-        return false;
-    };
-    cursor.x >= min.x && cursor.x <= max.x && cursor.y >= min.y && cursor.y <= max.y
-}
-
-/// Picks up cursor samples the app forwarded and feeds the detectors.
+/// Feeds the latest cursor sample to the detectors.
 pub fn track_pointer(
     time: Res<Time>,
     mut gestures: ResMut<GestureState>,
-    state: Res<AvatarState>,
+    mut state: ResMut<AvatarState>,
+    mask: Res<HitMask>,
     link: Res<AvatarLink>,
 ) {
-    let Some(sample) = state.pointer else {
+    let Some(sample) = state.pointer.take() else {
         return;
     };
-    // An opaque report of the window state, so the app can toggle click-through.
-    let over = over_model(&state, sample.position);
-    if over != state.last_over_model {
-        link.send(Event::HoverChanged { over });
+    let size = Vec2::new(state.viewport.0 as f32, state.viewport.1 as f32);
+    let over = mask.hit(sample.position.x, sample.position.y, HIT_RADIUS);
+    gestures.update(sample, over, size, time.delta_secs().min(0.1), &link);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(x: f32, y: f32, left: bool) -> PointerSample {
+        PointerSample {
+            position: Vec2::new(x, y),
+            left,
+            ..default()
+        }
     }
-    gestures.update(sample.position, sample.pressed, time.delta_secs().min(0.1), &link);
+
+    #[test]
+    fn presses_off_the_model_never_drag() {
+        let link = AvatarLink::detached();
+        let mut g = GestureState::default();
+        let size = Vec2::new(260.0, 370.0);
+        g.update(sample(10.0, 10.0, false), false, size, 0.03, &link);
+        g.update(sample(10.0, 10.0, true), false, size, 0.03, &link);
+        g.update(sample(80.0, 80.0, true), false, size, 0.03, &link);
+        assert!(!g.dragging);
+        let sent = link.drain_sent();
+        assert!(!sent.iter().any(|e| matches!(e, Event::DragStart)));
+    }
+
+    #[test]
+    fn press_on_model_then_move_drags_and_double_click_pokes() {
+        let link = AvatarLink::detached();
+        let mut g = GestureState::default();
+        let size = Vec2::new(260.0, 370.0);
+        g.update(sample(100.0, 200.0, false), true, size, 0.03, &link);
+        g.update(sample(100.0, 200.0, true), true, size, 0.03, &link);
+        g.update(sample(130.0, 200.0, true), true, size, 0.03, &link);
+        g.update(sample(130.0, 200.0, false), true, size, 0.03, &link);
+        let sent = link.drain_sent();
+        assert!(sent.iter().any(|e| matches!(e, Event::DragStart)));
+        assert!(sent.iter().any(|e| matches!(e, Event::DragEnd)));
+
+        for _ in 0..2 {
+            g.update(sample(100.0, 200.0, true), true, size, 0.05, &link);
+            g.update(sample(100.0, 200.0, false), true, size, 0.05, &link);
+        }
+        assert!(link.drain_sent().iter().any(|e| matches!(e, Event::Poke)));
+    }
 }

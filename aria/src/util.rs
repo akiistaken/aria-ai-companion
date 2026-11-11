@@ -1,4 +1,4 @@
-﻿//! Small shared helpers: time formatting, string cleanup, retry-free HTTP JSON.
+//! Small shared helpers: time formatting, string cleanup, retry-free HTTP JSON.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -138,8 +138,8 @@ pub fn truncate(text: &str, max: usize) -> String {
     }
     let clipped: String = text.chars().take(max.saturating_sub(1)).collect();
     match clipped.rfind(' ') {
-        Some(i) if i > max / 2 => format!("{}â€¦", &clipped[..i]),
-        _ => format!("{clipped}â€¦"),
+        Some(i) if i > max / 2 => format!("{}…", &clipped[..i]),
+        _ => format!("{clipped}…"),
     }
 }
 
@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn stamp_formatting_matches_tokens() {
-        // 2026-11-11T09:09:00+05:30
-        let ts = 1_762_840_140.0;
+        // 2026-11-11T12:00:00Z: midday UTC is still 2026-11-11 in every zone from -11 to +11.
+        let ts = 1_794_398_400.0;
         let s = format_stamp(ts, "%Y-%m-%d %H:%M");
         assert_eq!(s.len(), 16, "got {s}");
         assert!(s.starts_with("2026-11-11"), "got {s}");

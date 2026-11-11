@@ -1,4 +1,4 @@
-﻿//! Aria â€” autonomous desktop companion.
+//! Aria — autonomous desktop companion.
 //!
 //! Rust + Slint port of the original Python assistant. Slint draws every surface; the avatar
 //! keeps its WebGL renderer inside an embedded WebView2 child window.

@@ -42,6 +42,7 @@ pub struct AvatarLink {
     last: Arc<Mutex<LastState>>,
 }
 
+/// Last values pushed, so the 30 Hz motion tick only writes to the socket when something moved.
 #[derive(Default, Clone, PartialEq)]
 struct LastState {
     emotion: String,
@@ -49,7 +50,16 @@ struct LastState {
     moving: bool,
     talking: bool,
     peeking: PeekSide,
-    fuzzy_scale: i32,
+    look: (i32, i32),
+    mouth: (i32, i32),
+    pointer: Option<(i32, i32, bool, bool, bool)>,
+    rect: Option<(i32, i32, u32, u32)>,
+    fps: Option<u32>,
+}
+
+/// Quantises a `-1..1` value so jitter below 1% is not re-sent.
+fn q(v: f32) -> i32 {
+    (v * 100.0).round() as i32
 }
 
 impl AvatarLink {
@@ -184,11 +194,27 @@ impl AvatarLink {
     }
 
     pub fn set_mouse_look(&self, x: f32, y: f32) {
+        if !self.changed(|last| std::mem::replace(&mut last.look, (q(x), q(y))) != (q(x), q(y))) {
+            return;
+        }
         self.send(Command::SetLook { x, y });
     }
 
+    /// Lip-sync envelope. Re-sent at least every few frames while non-zero so the renderer, which
+    /// expires stale envelopes after 300 ms, keeps using it.
     pub fn set_mouth(&self, aa: f32, oh: f32) {
+        let key = (q(aa), q(oh));
+        let silent = key == (0, 0);
+        if !self.changed(|last| std::mem::replace(&mut last.mouth, key) != key || !silent) {
+            return;
+        }
         self.send(Command::SetMouth { aa, oh });
+    }
+
+    /// Runs `f` against the last-sent state; returns its verdict on whether to send.
+    fn changed(&self, f: impl FnOnce(&mut LastState) -> bool) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut last)
     }
 
     pub fn set_peeking(&self, side: &str) {
@@ -233,13 +259,34 @@ impl AvatarLink {
         });
     }
 
+    /// 30 normally, 10 in game mode, 0 to pause rendering entirely. Only sent on change.
     pub fn set_fps(&self, fps: u32) {
+        if !self.changed(|last| std::mem::replace(&mut last.fps, Some(fps)) != Some(fps)) {
+            return;
+        }
         self.send(Command::SetFps { fps });
     }
 
-    /// Forwards one cursor sample. The avatar window is layered and receives no input itself.
-    pub fn set_pointer(&self, x: f32, y: f32, pressed: bool) {
-        self.send(Command::SetPointer { x, y, pressed });
+    /// Forwards one cursor sample, relative to the avatar window, in physical pixels. The avatar
+    /// window is layered and receives no input itself. Unchanged samples are not re-sent.
+    pub fn set_pointer(&self, x: f32, y: f32, left: bool, right: bool, middle: bool) {
+        let key = (x.round() as i32, y.round() as i32, left, right, middle);
+        if !self.changed(|last| last.pointer.replace(key) != Some(key)) {
+            return;
+        }
+        self.send(Command::SetPointer {
+            x,
+            y,
+            pressed: left,
+            right,
+            middle,
+        });
+    }
+
+
+    /// Forgets what was last sent, so a freshly (re)started renderer receives the full state.
+    pub fn reset_sent_state(&self) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = LastState::default();
     }
 
     /// Enables or disables click-through, so empty areas of the avatar window pass clicks on.
@@ -258,13 +305,23 @@ impl AvatarLink {
         });
     }
 
-    /// Resizes the avatar window. The main app owns the renderer's geometry.
+    /// Places the avatar window. The app decides the geometry; the renderer's window thread
+    /// applies it, because a second process calling `SetWindowPos` races `UpdateLayeredWindow`
+    /// (which also sets the position) and could snap the window back.
     pub fn set_window_rect(&self, x: i32, y: i32, width: i32, height: i32) {
-        let hwnd = self.hwnd();
-        if hwnd == 0 {
+        if !self.is_ready() || width <= 0 || height <= 0 {
             return;
         }
-        crate::win32::move_and_size_window(hwnd as isize, x, y, width, height);
+        let rect = (x, y, width as u32, height as u32);
+        if !self.changed(|last| std::mem::replace(&mut last.rect, Some(rect)) != Some(rect)) {
+            return;
+        }
+        self.send(Command::SetWindowRect {
+            x,
+            y,
+            width: width as u32,
+            height: height as u32,
+        });
     }
 
     /// Stops the renderer and its supervisor. Called on app shutdown.

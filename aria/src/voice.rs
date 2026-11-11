@@ -1,9 +1,9 @@
-﻿//! Voice: Edge neural TTS with a disk cache, rodio playback, microphone VAD capture and
+//! Voice: Edge neural TTS with a disk cache, rodio playback, microphone VAD capture and
 //! speech-to-text.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use msedge_tts::tts::client::connect;
@@ -27,7 +27,7 @@ pub struct VoicePreset {
 pub static VOICES: &[VoicePreset] = &[
     VoicePreset {
         key: "cloned_tsundere_1",
-        label: "Tsundere #1 â€” soft & flustered",
+        label: "Tsundere #1 — soft & flustered",
         edge_voice: "en-US-AvaMultilingualNeural",
         pitch_idle: 16,
         pitch_talking: 19,
@@ -40,7 +40,7 @@ pub static VOICES: &[VoicePreset] = &[
     },
     VoicePreset {
         key: "cloned_tsundere_2",
-        label: "Tsundere/Yandere #2 â€” intense & playful",
+        label: "Tsundere/Yandere #2 — intense & playful",
         edge_voice: "en-US-EmmaMultilingualNeural",
         pitch_idle: 18,
         pitch_talking: 22,
@@ -53,7 +53,7 @@ pub static VOICES: &[VoicePreset] = &[
     },
     VoicePreset {
         key: "cloned_tsundere_3",
-        label: "Tsundere #3 â€” sassy & high-energy",
+        label: "Tsundere #3 — sassy & high-energy",
         edge_voice: "en-US-AvaMultilingualNeural",
         pitch_idle: 17,
         pitch_talking: 20,
@@ -66,7 +66,7 @@ pub static VOICES: &[VoicePreset] = &[
     },
     VoicePreset {
         key: "cloned_tsundere_4",
-        label: "Wingman #4 â€” confident & punchy",
+        label: "Wingman #4 — confident & punchy",
         edge_voice: "en-US-EmmaMultilingualNeural",
         pitch_idle: 19,
         pitch_talking: 22,
@@ -116,25 +116,159 @@ pub fn is_recording() -> bool {
     RECORDING.load(Ordering::SeqCst)
 }
 
-// TODO(wire-up): speaking state is driven by the player thread.
-#[allow(dead_code)]
-pub fn set_speaking(v: bool) {
-    SPEAKING.store(v, Ordering::SeqCst);
-}
-
 pub fn shutdown() {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
     SPEAKING.store(false, Ordering::SeqCst);
 }
 
+// ---------------------------------------------------------------- lip-sync envelope
+
+/// Mouth shape of the audio playing right now, published by [`LipSync`] as `f32` bits.
+static MOUTH_AA: AtomicU32 = AtomicU32::new(0);
+static MOUTH_OH: AtomicU32 = AtomicU32::new(0);
+
+/// The current `(aa, oh)` lip-sync levels, both `0..1`. Zero when nothing is playing.
+pub fn mouth_levels() -> (f32, f32) {
+    (
+        f32::from_bits(MOUTH_AA.load(Ordering::Relaxed)),
+        f32::from_bits(MOUTH_OH.load(Ordering::Relaxed)),
+    )
+}
+
+fn publish_mouth(aa: f32, oh: f32) {
+    MOUTH_AA.store(aa.to_bits(), Ordering::Relaxed);
+    MOUTH_OH.store(oh.to_bits(), Ordering::Relaxed);
+}
+
+/// Wraps the TTS decoder and measures it as it plays.
+///
+/// Every ~20 ms window yields an RMS level (how open the mouth is) and a zero-crossing rate (a
+/// cheap stand-in for the formant split the WebView did with an FFT: rounded vowels sit low,
+/// open and fricative sounds cross zero often). It also owns the end of speech: `SPEAKING` drops
+/// when the audio runs out instead of after a duration guessed from the file size, and a
+/// superseded or stopped utterance is cut off mid-sample rather than playing to the end.
+struct LipSync<S> {
+    inner: S,
+    seq: i64,
+    window: usize,
+    count: usize,
+    sum_sq: f32,
+    crossings: usize,
+    last_positive: bool,
+    finished: bool,
+}
+
+impl<S: rodio::Source> LipSync<S> {
+    fn new(inner: S, seq: i64) -> Self {
+        let per_second = inner.sample_rate().get() as usize * inner.channels().get() as usize;
+        Self {
+            window: (per_second / 50).max(64),
+            inner,
+            seq,
+            count: 0,
+            sum_sq: 0.0,
+            crossings: 0,
+            last_positive: false,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        publish_mouth(0.0, 0.0);
+        if SPEECH_SEQ.load(Ordering::SeqCst) == self.seq {
+            SPEAKING.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn flush_window(&mut self) {
+        let n = self.count.max(1) as f32;
+        let rms = (self.sum_sq / n).sqrt();
+        let zcr = self.crossings as f32 / n;
+        // Speech RMS from Edge TTS peaks around 0.25; below ~0.02 is breath and room noise.
+        let open = ((rms - 0.02) * 5.5).clamp(0.0, 1.0);
+        let rounded = (1.0 - zcr * 9.0).clamp(0.0, 1.0);
+        publish_mouth(open * (1.0 - 0.45 * rounded), (open * rounded * 0.85).min(0.85));
+        self.count = 0;
+        self.sum_sq = 0.0;
+        self.crossings = 0;
+    }
+}
+
+impl<S: rodio::Source> Iterator for LipSync<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        if SHUTTING_DOWN.load(Ordering::Relaxed) || SPEECH_SEQ.load(Ordering::Relaxed) != self.seq {
+            self.finish();
+            return None;
+        }
+        let Some(sample) = self.inner.next() else {
+            self.finish();
+            return None;
+        };
+        let value = sample as f32;
+        self.sum_sq += value * value;
+        let positive = value >= 0.0;
+        if positive != self.last_positive {
+            self.crossings += 1;
+            self.last_positive = positive;
+        }
+        self.count += 1;
+        if self.count >= self.window {
+            self.flush_window();
+        }
+        Some(sample)
+    }
+}
+
+impl<S: rodio::Source> rodio::Source for LipSync<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+    fn channels(&self) -> rodio::ChannelCount {
+        self.inner.channels()
+    }
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.inner.sample_rate()
+    }
+    fn total_duration(&self) -> Option<std::time::Duration> {
+        self.inner.total_duration()
+    }
+}
+
+impl<S> Drop for LipSync<S> {
+    fn drop(&mut self) {
+        if !self.finished {
+            publish_mouth(0.0, 0.0);
+            if SPEECH_SEQ.load(Ordering::SeqCst) == self.seq {
+                SPEAKING.store(false, Ordering::SeqCst);
+            }
+        }
+    }
+}
+
 /// Strips markdown, emoji and stutter letters so TTS never spells them out.
 pub fn format_speech(text: &str, voice_key: &str) -> String {
+    // Compiled once: this runs for every spoken line.
+    static CODE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static LINK_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static STUTTER_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static BAKA_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let code_re = CODE_RE.get_or_init(|| regex::Regex::new(r"(?s)```.*?```").expect("valid regex"));
+    let link_re =
+        LINK_RE.get_or_init(|| regex::Regex::new(r"\[([^\]]+)\]\([^\)]+\)").expect("valid regex"));
+
     let mut s = text.to_string();
     // Fenced code blocks.
-    let code_re = regex::Regex::new(r"(?s)```.*?```").unwrap();
     s = code_re.replace_all(&s, "Here is the code you requested.").to_string();
     // Markdown links -> label.
-    let link_re = regex::Regex::new(r"\[([^\]]+)\]\([^\)]+\)").unwrap();
     s = link_re.replace_all(&s, "$1").to_string();
     s = s.replace('`', "").replace('*', "").replace('_', " ");
 
@@ -156,7 +290,9 @@ pub fn format_speech(text: &str, voice_key: &str) -> String {
 
     // Collapse stuttered first letters: "B-Baka", "I-It's", "F-Fine". Rust's regex engine has no
     // backreferences, so the repeated letter is detected by comparing the two captured letters.
-    let stutter = regex::Regex::new(r"\b([A-Za-z])-([A-Za-z])([A-Za-z]{1,})\b").unwrap();
+    let stutter = STUTTER_RE.get_or_init(|| {
+        regex::Regex::new(r"\b([A-Za-z])-([A-Za-z])([A-Za-z]{1,})\b").expect("valid regex")
+    });
     s = stutter
         .replace_all(&s, |caps: &regex::Captures| {
             let first = caps[1].to_ascii_lowercase();
@@ -170,16 +306,16 @@ pub fn format_speech(text: &str, voice_key: &str) -> String {
             }
         })
         .to_string();
-    let baka_re = regex::Regex::new(r"(?i)\bbaka\b").unwrap();
+    let baka_re = BAKA_RE.get_or_init(|| regex::Regex::new(r"(?i)\bbaka\b").expect("valid regex"));
     s = baka_re.replace_all(&s, baka).to_string();
 
     let cleaned = s.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    // Keep the first couple of sentences for fast synthesis.
+    // Keep the first couple of sentences for fast synthesis. (`regex` has no look-behind, which
+    // the old `(?<=[.!?])\s+` split needed: it panicked on every reply over 160 characters.)
     if cleaned.chars().count() > 160 {
-        let sentence_re = regex::Regex::new(r"(?<=[.!?])\s+").unwrap();
         let mut trimmed = String::new();
-        for part in sentence_re.split(&cleaned) {
+        for part in split_sentences(&cleaned) {
             let part = part.trim();
             if part.is_empty() {
                 continue;
@@ -198,6 +334,26 @@ pub fn format_speech(text: &str, voice_key: &str) -> String {
         }
     }
     cleaned
+}
+
+/// Splits after `.`, `!` or `?` followed by whitespace, keeping the punctuation.
+fn split_sentences(text: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0;
+    let mut pieces = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(c, '.' | '!' | '?') {
+            if let Some(&(_, next)) = chars.peek() {
+                if next.is_whitespace() {
+                    let end = i + c.len_utf8();
+                    pieces.push(&text[start..end]);
+                    start = end;
+                }
+            }
+        }
+    }
+    pieces.push(&text[start..]);
+    pieces.into_iter()
 }
 
 fn cache_file(spoken: &str, voice_key: &str, emotion: &str) -> PathBuf {
@@ -285,7 +441,8 @@ fn output_stream() -> &'static Mutex<Option<rodio::MixerDeviceSink>> {
     OUTPUT_STREAM.get_or_init(|| Mutex::new(None))
 }
 
-fn play_file(path: &Path) -> bool {
+/// Starts playback of one utterance. The [`LipSync`] wrapper clears `SPEAKING` when it ends.
+fn play_file(path: &Path, seq: i64) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
@@ -294,6 +451,7 @@ fn play_file(path: &Path) -> bool {
         log::warn!("could not decode {}", path.display());
         return false;
     };
+    let source = LipSync::new(source, seq);
     let mut guard = output_stream().lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         match rodio::DeviceSinkBuilder::open_default_sink() {
@@ -342,12 +500,8 @@ pub fn speak_async(text: &str, emotion: &str) {
         if SHUTTING_DOWN.load(Ordering::SeqCst) || SPEECH_SEQ.load(Ordering::SeqCst) != seq {
             return;
         }
-        play_file(&path);
-        // Rough duration from MP3 size at 48 kbit/s so lip-sync can settle.
-        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(32_000);
-        let secs = (bytes as f64 / 6_000.0).clamp(1.6, 20.0);
-        std::thread::sleep(std::time::Duration::from_secs_f64(secs + 0.3));
-        if SPEECH_SEQ.load(Ordering::SeqCst) == seq {
+        // On success the lip-sync source clears `SPEAKING` when the audio actually ends.
+        if !play_file(&path, seq) && SPEECH_SEQ.load(Ordering::SeqCst) == seq {
             SPEAKING.store(false, Ordering::SeqCst);
         }
     });

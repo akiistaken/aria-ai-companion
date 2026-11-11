@@ -66,16 +66,30 @@ pub enum Command {
         zoom: f32,
         y_offset: f32,
     },
-    /// 30 normal, 10 in game mode, 0 = paused.
+    /// 30 normal, 10 in game mode, 0 = paused (nothing rendered, window hidden).
     SetFps { fps: u32 },
-    /// The window got or lost primary-button focus, forwarded from the app.
+    /// Where the avatar window goes, in physical screen pixels. The renderer's window thread is
+    /// the only thing that moves the window (a second mover races `UpdateLayeredWindow`), and it
+    /// draws at exactly this size since a layered window shows its bitmap 1:1.
+    SetWindowRect {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    /// One cursor sample, in physical pixels relative to the avatar window's top-left corner.
     ///
     /// The avatar window is layered and gets no input of its own, so the app feeds it the global
     /// cursor position and button state.
     SetPointer {
         x: f32,
         y: f32,
+        /// Primary (left) button.
         pressed: bool,
+        #[serde(default)]
+        right: bool,
+        #[serde(default)]
+        middle: bool,
     },
     /// Whether clicks should reach the desktop: false over empty space.
     SetClickThrough { enabled: bool },
@@ -161,6 +175,19 @@ mod tests {
         // A bad line must be ignorable, not a panic.
         assert!(Event::from_line("{\"kind\":\"nope\"}").is_none());
         assert!(Event::from_line("not json at all").is_none());
+    }
+
+    #[test]
+    fn old_pointer_lines_still_parse() {
+        // Older senders omit the extra buttons; they must default to released.
+        let line = r#"{"kind":"set_pointer","data":{"x":1.0,"y":2.0,"pressed":true}}"#;
+        match serde_json::from_str::<Command>(line).expect("parses") {
+            Command::SetPointer { pressed, right, middle, .. } => {
+                assert!(pressed);
+                assert!(!right && !middle);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]

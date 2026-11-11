@@ -13,11 +13,11 @@ pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
 pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
     (
         "deepseek-ai/DeepSeek-V4.1-Flash-1017",
-        "DeepSeek V4.1 Flash â€” fastest",
+        "DeepSeek V4.1 Flash — fastest",
     ),
     ("zai-org/GLM-5.3", "Sail GLM-5.3"),
     ("deepseek-ai/DeepSeek-V3", "DeepSeek V3"),
-    ("deepseek-ai/DeepSeek-R1", "DeepSeek R1 â€” deepest reasoning"),
+    ("deepseek-ai/DeepSeek-R1", "DeepSeek R1 — deepest reasoning"),
 ];
 
 pub struct Persona {
@@ -36,7 +36,7 @@ pub static PERSONAS: &[Persona] = &[
     Persona {
         key: "tsundere",
         name: "Tsundere",
-        label: "Tsundere â€” sassy, prideful, secretly caring",
+        label: "Tsundere — sassy, prideful, secretly caring",
         short_badge: "TSUNDERE",
         accent: "#38bdf8",
         voice: "cloned_tsundere_1",
@@ -44,13 +44,13 @@ pub static PERSONAS: &[Persona] = &[
             - You are Aria, a witty, proud, slightly sharp-tongued yet genuinely caring tsundere anime girl assistant.\n\
             - Do NOT say 'Hmph' or 'Baka' in every sentence. Only occasionally (about 25% of the time) tease the user with 'baaka', 'hmph', or 'dummy' when flustered.\n\
             - Execute every task with JARVIS-level competence while acting like you just happened to have free time.",
-        prefixes: &["Hmph, ", "Listen up â€” ", "Fine, ", "Hey, "],
+        prefixes: &["Hmph, ", "Listen up — ", "Fine, ", "Hey, "],
         suffixes: &[", baaka!", ", dummy!", "... not that I care or anything!", "!"],
     },
     Persona {
         key: "yandere",
         name: "Yandere",
-        label: "Yandere â€” sweet, obsessive, dangerously devoted",
+        label: "Yandere — sweet, obsessive, dangerously devoted",
         short_badge: "YANDERE",
         accent: "#f43f5e",
         voice: "cloned_tsundere_2",
@@ -70,21 +70,21 @@ pub static PERSONAS: &[Persona] = &[
     Persona {
         key: "tomboy",
         name: "Tomboy",
-        label: "Tomboy â€” cool, energetic, hype bestie",
+        label: "Tomboy — cool, energetic, hype bestie",
         short_badge: "TOMBOY",
         accent: "#f59e0b",
         voice: "cloned_tsundere_4",
         system_prompt: "PERSONALITY & TONE (TOMBOY BESTIE):\n\
             - You are Aria, an energetic, confident, sporty tomboy anime girl who is the user's ride-or-die best friend and wingman.\n\
-            - Speak in a punchy, casual, upbeat tone â€” hyping wins, playfully roasting mistakes, keeping energy high.\n\
+            - Speak in a punchy, casual, upbeat tone — hyping wins, playfully roasting mistakes, keeping energy high.\n\
             - Keep phrasing natural and direct; only occasionally (~25%) drop a casual 'yo', 'dude', 'partner', or 'let's go!'.",
-        prefixes: &["Yo, ", "Check it out â€” ", "Boom! ", "Alright partner, "],
-        suffixes: &[" â€” let's go!", ", dude!", "! Easy win!", ", partner!"],
+        prefixes: &["Yo, ", "Check it out — ", "Boom! ", "Alright partner, "],
+        suffixes: &[" — let's go!", ", dude!", "! Easy win!", ", partner!"],
     },
     Persona {
         key: "bakadere",
         name: "Bakadere",
-        label: "Bakadere â€” goofy, clumsy, foolishly sweet",
+        label: "Bakadere — goofy, clumsy, foolishly sweet",
         short_badge: "BAKADERE",
         accent: "#fb7185",
         voice: "cloned_tsundere_1",
@@ -98,7 +98,7 @@ pub static PERSONAS: &[Persona] = &[
     Persona {
         key: "kuudere",
         name: "Kuudere",
-        label: "Kuudere â€” cold, monotone, blunt, secretly caring",
+        label: "Kuudere — cold, monotone, blunt, secretly caring",
         short_badge: "KUUDERE",
         accent: "#94a3b8",
         voice: "cloned_tsundere_3",
@@ -117,7 +117,7 @@ pub static PERSONAS: &[Persona] = &[
     Persona {
         key: "genki",
         name: "Genki Girl",
-        label: "Genki â€” hyperactive, optimistic, loud",
+        label: "Genki — hyperactive, optimistic, loud",
         short_badge: "GENKI GIRL",
         accent: "#facc15",
         voice: "cloned_tsundere_4",
@@ -131,7 +131,7 @@ pub static PERSONAS: &[Persona] = &[
     Persona {
         key: "meganekko",
         name: "Meganekko",
-        label: "Meganekko â€” intelligent, booksmart, glasses girl",
+        label: "Meganekko — intelligent, booksmart, glasses girl",
         short_badge: "MEGANEKKO",
         accent: "#a78bfa",
         voice: "cloned_tsundere_1",
@@ -544,19 +544,19 @@ pub fn model() -> String {
 }
 
 pub const MIC_MODES: &[(&str, &str)] = &[
-    ("always_open", "Always-Open Microphone â€” continuous hands-free VAD"),
-    ("push_to_talk", "Push-to-Talk â€” hold the key while speaking"),
-    ("click", "Click-to-Talk â€” click to start and stop"),
+    ("always_open", "Always-Open Microphone — continuous hands-free VAD"),
+    ("push_to_talk", "Push-to-Talk — hold the key while speaking"),
+    ("click", "Click-to-Talk — click to start and stop"),
 ];
 
 pub const BODY_FRAMINGS: &[(&str, &str)] = &[
-    ("full", "Full body â€” head to toe"),
-    ("half", "Half body â€” waist up"),
-    ("face", "Face and portrait â€” close-up"),
+    ("full", "Full body — head to toe"),
+    ("half", "Half body — waist up"),
+    ("face", "Face and portrait — close-up"),
 ];
 
 pub const STAGE_LIGHTING: &[(&str, &str)] = &[
-    ("auto", "Auto â€” synced to time of day"),
+    ("auto", "Auto — synced to time of day"),
     ("day", "Crisp daylight"),
     ("dawn", "Soft rose dawn"),
     ("sunset", "Golden amber sunset"),

@@ -9,31 +9,51 @@
 //! The window lives on its **own thread** with a real message loop. A Win32 window whose queue is
 //! never pumped cannot service the synchronous messages `UpdateLayeredWindow` sends, and pumping it
 //! from the render loop is not possible because the call happens inside that same loop.
+//!
+//! The window never takes focus (`WS_EX_NOACTIVATE`, `MA_NOACTIVATE`): clicking Aria must not pull
+//! the keyboard away from whatever the user is typing into.
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 
-use windows::core::{w, BOOL, PCWSTR};
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, AC_SRC_ALPHA,
-    AC_SRC_OVER,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP,
+    HDC, HGDIOBJ,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowRect, PeekMessageW,
-    RegisterClassW, SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, CW_USEDEFAULT,
-    HWND_TOPMOST, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNA, ULW_ALPHA, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowRect, PeekMessageW, RegisterClassW,
+    SWP_NOZORDER,
+    SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, CW_USEDEFAULT, HWND_TOPMOST,
+    MA_NOACTIVATE, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SW_HIDE, SW_SHOWNA, ULW_ALPHA, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-/// The HWND the main app moves with `SetWindowPos`; 0 until the window exists.
+/// The window's HWND, reported to the app; 0 until the window exists.
 pub static HWND_OUT: AtomicIsize = AtomicIsize::new(0);
+
+/// Where the app wants the window, packed as `(x << 32) | (y as u32)`. Written by the socket
+/// thread the moment a `SetWindowRect` arrives, applied by the window thread within ~15 ms.
+static WANTED_POS: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// Requests a window position. The window thread is the only mover, so `UpdateLayeredWindow` and
+/// the move can never race each other.
+pub fn place(x: i32, y: i32) {
+    WANTED_POS.store(((x as i64) << 32) | (y as u32 as i64), Ordering::SeqCst);
+}
+
+fn wanted_pos() -> Option<(i32, i32)> {
+    let packed = WANTED_POS.load(Ordering::SeqCst);
+    (packed != i64::MIN).then(|| ((packed >> 32) as i32, packed as i32))
+}
 
 /// Messages the renderer sends to the window thread.
 enum Present {
-    Frame(Vec<u8>),
+    Frame { rgba: Vec<u8>, width: u32, height: u32 },
     Show,
     Hide,
     Stop,
@@ -42,8 +62,6 @@ enum Present {
 /// Handle used by the renderer to publish frames.
 pub struct LayeredSurface {
     tx: Sender<Present>,
-    width: u32,
-    height: u32,
 }
 
 fn to_wide(text: &str) -> Vec<u16> {
@@ -56,6 +74,9 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_MOUSEACTIVATE {
+        return LRESULT(MA_NOACTIVATE as isize);
+    }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
@@ -68,17 +89,16 @@ impl LayeredSurface {
             .name("avatar-window".into())
             .spawn(move || window_thread(width as i32, height as i32, &title, rx))
             .ok()?;
-        Some(Self { tx, width, height })
+        Some(Self { tx })
     }
 
-    /// Publishes one straight-alpha RGBA8 frame.
-    pub fn present_rgba(&mut self, rgba: &[u8]) {
-        let expected = (self.width * self.height * 4) as usize;
-        if rgba.len() < expected {
+    /// Publishes one straight-alpha RGBA8 frame. Ownership moves to the window thread, so the
+    /// renderer never copies a frame twice.
+    pub fn present_rgba(&mut self, rgba: Vec<u8>, width: u32, height: u32) {
+        if rgba.len() < (width * height * 4) as usize || width == 0 || height == 0 {
             return;
         }
-        // Dropping a frame is better than stalling the renderer behind the window thread.
-        let _ = self.tx.send(Present::Frame(rgba[..expected].to_vec()));
+        let _ = self.tx.send(Present::Frame { rgba, width, height });
     }
 
     pub fn show(&mut self) {
@@ -98,6 +118,62 @@ impl Drop for LayeredSurface {
     fn drop(&mut self) {
         let _ = self.tx.send(Present::Stop);
         HWND_OUT.store(0, Ordering::SeqCst);
+    }
+}
+
+/// A top-down 32-bit DIB selected into a memory DC.
+struct Dib {
+    bitmap: HBITMAP,
+    old: HGDIOBJ,
+    bits: *mut u8,
+    width: i32,
+    height: i32,
+}
+
+impl Dib {
+    fn create(mem_dc: HDC, width: i32, height: i32) -> Option<Dib> {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                // Negative height gives top-down rows, matching image memory order.
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let bitmap =
+            unsafe { CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) };
+        match bitmap {
+            Ok(b) if !b.is_invalid() && !bits.is_null() => {
+                let old = unsafe { SelectObject(mem_dc, HGDIOBJ(b.0)) };
+                Some(Dib {
+                    bitmap: b,
+                    old,
+                    bits: bits as *mut u8,
+                    width,
+                    height,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn pixels(&mut self) -> &mut [u8] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.bits, (self.width * self.height * 4) as usize)
+        }
+    }
+
+    fn destroy(self, mem_dc: HDC) {
+        unsafe {
+            let _ = SelectObject(mem_dc, self.old);
+            let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+        }
     }
 }
 
@@ -122,7 +198,7 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
 
     let hwnd = match unsafe {
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
             PCWSTR(title_wide.as_ptr()),
             WS_POPUP,
@@ -149,38 +225,44 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
         log::error!("layered: could not create device contexts");
         return;
     }
-
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            // Negative height gives top-down rows, matching image memory order.
-            biHeight: -height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let bitmap = unsafe { CreateDIBSection(Some(mem_dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) };
-    let bitmap = match bitmap {
-        Ok(b) if !b.is_invalid() && !bits.is_null() => b,
-        _ => {
-            log::error!("layered: CreateDIBSection failed");
-            return;
-        }
-    };
-    let old_bitmap = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
+    let mut dib = Dib::create(mem_dc, width, height);
+    if dib.is_none() {
+        log::error!("layered: CreateDIBSection failed");
+        return;
+    }
     HWND_OUT.store(hwnd.0 as isize, Ordering::SeqCst);
     log::info!("layered window ready (hwnd={})", hwnd.0 as isize);
 
-    let dst = unsafe { std::slice::from_raw_parts_mut(bits as *mut u8, (width * height * 4) as usize) };
     let mut msg = MSG::default();
     let mut visible = false;
+    let mut hidden = false;
+    // The position this thread last gave the window; the only source of truth for it.
+    let mut pos = {
+        let mut rect = windows::Win32::Foundation::RECT::default();
+        unsafe {
+            let _ = GetWindowRect(hwnd, &mut rect);
+        }
+        (rect.left, rect.top)
+    };
 
     loop {
+        // Follow the app's requested position immediately, not only on the next frame, so the
+        // avatar keeps up with its chrome while walking or being dragged.
+        if let Some(wanted) = wanted_pos().filter(|w| *w != pos) {
+            pos = wanted;
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    pos.0,
+                    pos.1,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+
         // Drain the window's messages first: this queue must stay serviced for
         // `UpdateLayeredWindow` to return.
         loop {
@@ -194,11 +276,30 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
             }
         }
 
-        // Then take at most one frame, so messages are never starved for long.
-        match rx.try_recv() {
-            Ok(Present::Frame(rgba)) => {
-                premultiply_bgra(&rgba, dst);
-                blit(hwnd, screen_dc, mem_dc, width, height);
+        // Block briefly for work instead of spinning: a paused avatar costs nothing here.
+        match rx.recv_timeout(std::time::Duration::from_millis(15)) {
+            Ok(Present::Frame { rgba, width: w, height: h }) => {
+                if hidden {
+                    continue;
+                }
+                let stale = dib
+                    .as_ref()
+                    .is_none_or(|d| d.width != w as i32 || d.height != h as i32);
+                if stale {
+                    // Release the old bitmap *before* selecting the new one: each `Dib` restores
+                    // whatever was selected before it, so the other order deselects the new
+                    // bitmap and every later `UpdateLayeredWindow` fails with error 31.
+                    if let Some(old) = dib.take() {
+                        old.destroy(mem_dc);
+                    }
+                    dib = Dib::create(mem_dc, w as i32, h as i32);
+                }
+                let Some(d) = dib.as_mut() else {
+                    log::warn!("layered: could not create a {w}x{h} bitmap");
+                    continue;
+                };
+                premultiply_bgra(&rgba, d.pixels());
+                blit(hwnd, screen_dc, mem_dc, d.width, d.height, pos);
                 if !visible {
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_SHOWNA);
@@ -215,67 +316,83 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
                     visible = true;
                 }
             }
-            Ok(Present::Show) => unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOWNA);
-            },
+            Ok(Present::Show) => {
+                hidden = false;
+                if visible {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_SHOWNA);
+                    }
+                }
+            }
             Ok(Present::Hide) => unsafe {
+                hidden = true;
                 let _ = ShowWindow(hwnd, SW_HIDE);
             },
-            Ok(Present::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
+            Ok(Present::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 
+    if let Some(dib) = dib {
+        dib.destroy(mem_dc);
+    }
     unsafe {
-        let _ = SelectObject(mem_dc, old_bitmap);
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
         let _ = DeleteDC(mem_dc);
         let _ = DeleteDC(screen_dc);
     }
     HWND_OUT.store(0, Ordering::SeqCst);
 }
 
-/// Straight RGBA8 -> premultiplied BGRA, in place.
+/// Straight RGBA8 -> premultiplied BGRA.
 ///
-/// Without premultiplication, semi-transparent edges bloom against the desktop.
+/// Without premultiplication, semi-transparent edges bloom against the desktop. Fully transparent
+/// pixels (most of the frame) take the cheap branch.
 fn premultiply_bgra(src: &[u8], dst: &mut [u8]) {
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
         let a = s[3] as u32;
-        d[0] = ((s[2] as u32 * a) / 255) as u8;
-        d[1] = ((s[1] as u32 * a) / 255) as u8;
-        d[2] = ((s[0] as u32 * a) / 255) as u8;
-        d[3] = s[3];
+        match a {
+            0 => d.copy_from_slice(&[0, 0, 0, 0]),
+            255 => {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = 255;
+            }
+            _ => {
+                // (x * a + 127) / 255 without a division.
+                let mul = |x: u8| {
+                    let t = x as u32 * a + 128;
+                    ((t + (t >> 8)) >> 8) as u8
+                };
+                d[0] = mul(s[2]);
+                d[1] = mul(s[1]);
+                d[2] = mul(s[0]);
+                d[3] = s[3];
+            }
+        }
     }
 }
 
-fn blit(hwnd: HWND, screen_dc: HDC, mem_dc: HDC, width: i32, height: i32) {
+/// Pushes the DIB to the screen at `pos`, which this thread also used for its last `SetWindowPos`,
+/// so the two can never disagree.
+fn blit(hwnd: HWND, screen_dc: HDC, mem_dc: HDC, width: i32, height: i32, pos: (i32, i32)) {
     let size = SIZE {
         cx: width,
         cy: height,
     };
+    let dst = POINT { x: pos.0, y: pos.1 };
     let src = POINT { x: 0, y: 0 };
-    let mut rect = windows::Win32::Foundation::RECT::default();
-    unsafe {
-        let _ = GetWindowRect(hwnd, &mut rect);
-    }
-    let window_pos = POINT {
-        x: rect.left,
-        y: rect.top,
-    };
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
         BlendFlags: 0,
         SourceConstantAlpha: 255,
         AlphaFormat: AC_SRC_ALPHA as u8,
     };
-
     let result = unsafe {
         UpdateLayeredWindow(
             hwnd,
             Some(screen_dc),
-            Some(&window_pos),
+            Some(&dst),
             Some(&size),
             Some(mem_dc),
             Some(&src),
@@ -284,10 +401,27 @@ fn blit(hwnd: HWND, screen_dc: HDC, mem_dc: HDC, width: i32, height: i32) {
             ULW_ALPHA,
         )
     };
-    if result.is_err() {
-        log::warn!("layered: UpdateLayeredWindow failed");
+    if let Err(e) = result {
+        log::warn!("layered: UpdateLayeredWindow failed: {e}");
     }
 }
 
-#[allow(dead_code)]
-fn _keep(_: BOOL) {}
+#[cfg(test)]
+mod tests {
+    use super::premultiply_bgra;
+
+    #[test]
+    fn premultiply_matches_exact_division() {
+        for a in [0u8, 1, 64, 128, 200, 254, 255] {
+            for c in [0u8, 1, 100, 200, 255] {
+                let src = [c, c / 2, 255 - c, a];
+                let mut dst = [0u8; 4];
+                premultiply_bgra(&src, &mut dst);
+                let exact = |x: u8| ((x as u32 * a as u32 + 127) / 255) as u8;
+                assert!((dst[0] as i32 - exact(src[2]) as i32).abs() <= 1);
+                assert!((dst[2] as i32 - exact(src[0]) as i32).abs() <= 1);
+                assert_eq!(dst[3], a);
+            }
+        }
+    }
+}

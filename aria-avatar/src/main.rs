@@ -1,63 +1,66 @@
 ﻿//! Aria avatar renderer.
 //!
-//! A Bevy app in its own transparent, frameless, always-on-top window. It loads a VRM 1.0 model
-//! with `bevy_vrm1` (MToon shading, spring bones, look-at, node constraints) and is driven by the
-//! main app over a local socket. The main app owns the window position: it moves this process's
-//! HWND with `SetWindowPos`, so nothing here handles desktop geometry.
+//! A headless Bevy app that loads a VRM 1.0 model with `bevy_vrm1` (MToon shading, spring bones,
+//! look-at, node constraints), renders it offscreen and presents it through a layered Win32 window
+//! with per-pixel alpha. The main app drives it over a local socket and owns the window's position
+//! and size; nothing here handles desktop geometry.
 
-#[path = "behaviors.rs"]
 mod behaviors;
-#[path = "layered.rs"]
-mod layered;
-#[path = "input.rs"]
+mod hearts;
 mod input;
-#[path = "link.rs"]
+mod layered;
+mod lighting;
 mod link;
-#[path = "posing.rs"]
 mod posing;
-#[path = "present.rs"]
 mod present;
+mod props;
+mod rig;
 
 use bevy::prelude::*;
-use bevy::window::{CompositeAlphaMode, WindowLevel};
 use bevy_vrm1::prelude::*;
 use std::path::PathBuf;
 
 use link::AvatarLink;
 
-/// Window size in physical pixels. The camera framing below is tuned for this aspect.
-const WINDOW_W: f32 = 520.0;
-const WINDOW_H: f32 = 740.0;
+/// Default window size in physical pixels: the app's stage slot at scale 1. The app sends the real
+/// size with `SetViewport` as soon as it connects.
+pub const DEFAULT_W: u32 = 260;
+pub const DEFAULT_H: u32 = 370;
+
+/// Vertical field of view of the reference stage's camera; the framing distances assume it.
+const FOV_DEGREES: f32 = 28.0;
 
 fn main() {
     let args = link::Args::parse();
 
-    // Asset root: the bundled models live next to the exe (`<exe>/assets`) in a release layout
-    // and at `<workspace>/aria-avatar/assets` in dev. Absolute model paths bypass this entirely.
-    let asset_root = std::path::Path::new(&args.model)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .filter(|p| p.is_dir())
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|p| p.join("assets")))
-                .filter(|p| p.is_dir())
-        })
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.join("aria-avatar").join("assets"))
-                .filter(|p| p.is_dir())
-        })
+    // Asset root: the bundled models live next to the exe (`<exe>/assets`) in a release layout,
+    // at `<workspace>/assets` or `<workspace>/aria-avatar/assets` in dev. Absolute model paths
+    // bypass this entirely.
+    let asset_root = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("assets")))
+        .into_iter()
+        .chain(std::env::current_dir().ok().map(|d| d.join("assets")))
+        .chain(std::env::current_dir().ok().map(|d| d.join("aria-avatar").join("assets")))
+        .find(|p| p.join(behaviors::BUNDLED_MODEL).is_file())
         .unwrap_or_else(|| PathBuf::from("assets"));
+
+    let initial_model = if args.model.trim().is_empty() {
+        behaviors::BUNDLED_MODEL.to_string()
+    } else {
+        args.model.clone()
+    };
+
+    let mut state = behaviors::AvatarState::with_model(initial_model);
+    if args.port == 0 {
+        apply_dev_overrides(&mut state);
+    }
 
     let mut app = App::new();
     app.add_plugins(
-        // No `WindowPlugin` window at all: Bevy renders headless into an offscreen image, and the
-        // presentation happens through a plain Win32 layered window. Adding a real Bevy window
-        // would create a swap chain that can only be `Opaque` and would block on present when
-        // nothing draws into it.
+        // No window at all: Bevy renders headless into an offscreen image, and presentation
+        // happens through a plain Win32 layered window. A real Bevy window would create a swap
+        // chain that can only be `Opaque`.
         DefaultPlugins
             .set(bevy::asset::AssetPlugin {
                 file_path: asset_root.to_string_lossy().to_string(),
@@ -76,23 +79,22 @@ fn main() {
                 exit_condition: bevy::window::ExitCondition::DontExit,
                 ..default()
             })
-            // Rendering is driven by the app loop, not by a window event loop.
+            // Rendering is driven by `run_loop`, not by a window event loop.
             .disable::<bevy::winit::WinitPlugin>(),
     )
     .add_plugins(VrmPlugin)
     .insert_resource(ClearColor(Color::NONE))
-    .insert_resource(behaviors::AvatarState {
-        initial_model: args.model.clone(),
-        ..default()
-    })
+    .insert_resource(state)
     .init_resource::<present::Presenter>()
     .init_resource::<present::LatestFrame>()
+    .init_resource::<present::HitMask>()
+    .init_resource::<hearts::Hearts>()
     .init_resource::<input::GestureState>()
     .insert_resource(AvatarLink::new(args))
     .set_runner(run_loop)
     .add_systems(
         Startup,
-        (setup_layered, setup_camera, setup_lights).chain(),
+        (setup_layered, setup_camera, lighting::spawn_lights).chain(),
     )
     .add_systems(
         Update,
@@ -100,7 +102,16 @@ fn main() {
             // Handshake first, so the app learns the window handle as early as possible.
             link::announce_ready,
             link::pump_link,
+            behaviors::spawn_look_target,
+            behaviors::manage_model,
+            behaviors::resolve_rig,
+            behaviors::build_props,
+            present::apply_viewport,
+            present::apply_pause,
+            lighting::apply_lighting,
             behaviors::animate,
+            props::sync_visibility,
+            props::animate_props,
             input::track_pointer,
             present::present_latest,
             present::request_capture,
@@ -108,6 +119,33 @@ fn main() {
             .chain(),
     )
     .run();
+}
+
+/// Standalone runs (no `--port`) can preview states without the app:
+/// `ARIA_AVATAR_EMOTION=happy`, `ARIA_AVATAR_PROPS=halo,cat_ears`, `ARIA_AVATAR_FRAMING=full`,
+/// `ARIA_AVATAR_LIGHTING=sunset`, `ARIA_AVATAR_SIZE=260x370`.
+fn apply_dev_overrides(state: &mut behaviors::AvatarState) {
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    if let Some(emotion) = var("ARIA_AVATAR_EMOTION") {
+        state.emotion = emotion;
+    }
+    if let Some(props) = var("ARIA_AVATAR_PROPS") {
+        for prop in props.split(',') {
+            state.props.insert(prop.trim().to_string(), true);
+        }
+    }
+    if let Some(framing) = var("ARIA_AVATAR_FRAMING") {
+        state.framing = framing;
+    }
+    if let Some(lighting) = var("ARIA_AVATAR_LIGHTING") {
+        state.lighting = lighting;
+    }
+    if let Some((w, h)) = var("ARIA_AVATAR_SIZE").and_then(|s| {
+        let (w, h) = s.split_once('x')?;
+        Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+    }) {
+        state.viewport = (w, h);
+    }
 }
 
 /// Drives the headless app at its target frame rate.
@@ -118,7 +156,6 @@ fn run_loop(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
 
-
     let mut last = std::time::Instant::now();
     loop {
         app.update();
@@ -126,45 +163,37 @@ fn run_loop(mut app: App) -> AppExit {
         let fps = app
             .world()
             .get_resource::<behaviors::AvatarState>()
-            .map(|s| s.fps)
+            .map(|s| s.effective_fps())
             .unwrap_or(30);
-        if fps > 0 {
-            let target = std::time::Duration::from_secs_f32(1.0 / fps as f32);
-            let elapsed = last.elapsed();
-            if elapsed < target {
-                std::thread::sleep(target - elapsed);
-            }
-            last = std::time::Instant::now();
+        let target = if fps > 0 {
+            std::time::Duration::from_secs_f32(1.0 / fps as f32)
         } else {
-            // Paused: keep processing commands without rendering work.
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            last = std::time::Instant::now();
+            // Paused: nothing renders; keep draining commands at a relaxed pace.
+            std::time::Duration::from_millis(100)
+        };
+        let elapsed = last.elapsed();
+        if elapsed < target {
+            std::thread::sleep(target - elapsed);
         }
+        last = std::time::Instant::now();
     }
 }
 
-/// Turns the winit-created window into the layered presenter and starts offscreen rendering.
-///
-/// Runs on the first frame, by which point winit has created the native window.
+/// Creates the layered presenter window and the offscreen render target.
 fn setup_layered(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut presenter: ResMut<present::Presenter>,
 ) {
-    log::info!("setup_layered: creating the avatar window");
-    let Some(surface) = layered::LayeredSurface::spawn(WINDOW_W as u32, WINDOW_H as u32, "Aria Avatar")
-    else {
+    let Some(surface) = layered::LayeredSurface::spawn(DEFAULT_W, DEFAULT_H, "Aria Avatar") else {
         log::error!("could not create the avatar window for layered presentation");
         return;
     };
-    log::info!("layered surface created");
 
-    // The window can only be `Opaque`, so the scene renders into an image and is presented by the
-    // layered window instead of by the swap chain. `new_target_texture` is the constructor that
-    // marks the image as a valid render target.
+    // `new_target_texture` is the constructor that marks the image as a valid render target.
     let mut image = Image::new_target_texture(
-        WINDOW_W as u32,
-        WINDOW_H as u32,
+        DEFAULT_W,
+        DEFAULT_H,
         bevy::render::render_resource::TextureFormat::Rgba8Unorm,
         Some(bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb),
     );
@@ -174,47 +203,35 @@ fn setup_layered(
         | bevy::render::render_resource::TextureUsages::TEXTURE_BINDING;
     let handle = images.add(image);
 
-
     commands.insert_resource(present::OffscreenTarget(handle));
     presenter.set_surface(surface);
 }
 
 fn setup_camera(mut commands: Commands, target: Option<Res<present::OffscreenTarget>>) {
-    // Framing from the reference `applyVRMCameraFraming()`; the height-dependent numbers are
-    // applied once the model reports its metrics (see behaviors::frame_camera).
     let mut camera = commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 1.2, 2.8).looking_at(Vec3::new(0.0, 1.2, 0.0), Vec3::Y),
-        // Ambient light is a per-camera component in this Bevy version.
-        AmbientLight {
-            color: Color::srgb(0.85, 0.88, 0.95),
-            brightness: 220.0,
+        Projection::Perspective(PerspectiveProjection {
+            fov: FOV_DEGREES.to_radians(),
+            near: 0.1,
+            far: 20.0,
             ..default()
-        },
+        }),
+        Transform::from_xyz(0.0, 1.15, 2.35).looking_at(Vec3::new(0.0, 1.15, 0.0), Vec3::Y),
+        // Ambient light is a per-camera component in this Bevy version; `lighting` sets it.
+        AmbientLight::default(),
         behaviors::AvatarCamera,
     ));
-    // Rendering into an image is what lets the layered window composite the avatar with real
-    // per-pixel alpha; the window's own swap chain can only be opaque.
-    if let Some(target) = target {
-        log::info!("camera rendering into the offscreen target");
-        camera.insert(bevy::camera::RenderTarget::Image(
-            bevy::camera::ImageRenderTarget {
-                handle: target.0.clone(),
-                scale_factor: 1.0,
-            },
-        ));
-    } else {
-        log::error!("no offscreen target when spawning the camera");
+    // The camera receives its target in the same system that spawns it: a separate system would
+    // not see the entity until deferred commands are applied.
+    match target {
+        Some(target) => {
+            camera.insert(bevy::camera::RenderTarget::Image(
+                bevy::camera::ImageRenderTarget {
+                    handle: target.0.clone(),
+                    scale_factor: 1.0,
+                },
+            ));
+        }
+        None => log::error!("no offscreen target when spawning the camera"),
     }
-}
-
-fn setup_lights(mut commands: Commands) {
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 12_000.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(2.5, 4.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }

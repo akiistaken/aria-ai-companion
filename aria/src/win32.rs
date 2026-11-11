@@ -535,27 +535,33 @@ pub fn handle_is_null(h: HANDLE) -> bool {
     h.0.is_null()
 }
 
-/// Positions and sizes a window owned by another process (the avatar renderer).
+/// True while the workstation is locked (the lock screen owns the foreground).
 ///
-/// `SWP_NOACTIVATE` keeps the user's focus where it is, and `SWP_NOZORDER` leaves the Z-order
-/// alone so a walking avatar cannot jump in front of a fullscreen game.
-pub fn move_and_size_window(hwnd: isize, x: i32, y: i32, width: i32, height: i32) {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+/// Cheap enough for a once-a-second policy check: no session notifications to register for.
+pub fn session_locked() -> bool {
+    let Some(win) = active_window() else {
+        // No foreground window at all: the secure desktop is up.
+        return true;
     };
+    win.exe.eq_ignore_ascii_case("LockApp.exe")
+}
+
+/// Gives a window a hit/paint region of its full rect minus one hole `(x, y, w, h)`, in window
+/// pixels. Clicks inside the hole fall through to whatever is underneath.
+pub fn set_region_with_hole(hwnd: isize, width: i32, height: i32, hole: (i32, i32, i32, i32)) {
+    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF};
     if hwnd == 0 || width <= 0 || height <= 0 {
         return;
     }
     unsafe {
-        let _ = SetWindowPos(
-            HWND(hwnd as *mut _),
-            None,
-            x,
-            y,
-            width,
-            height,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
+        let full = CreateRectRgn(0, 0, width, height);
+        let cut = CreateRectRgn(hole.0, hole.1, hole.0 + hole.2, hole.1 + hole.3);
+        CombineRgn(Some(full), Some(full), Some(cut), RGN_DIFF);
+        let _ = DeleteObject(cut.into());
+        // On success the system owns `full`; it must not be deleted here.
+        if SetWindowRgn(HWND(hwnd as *mut _), Some(full), true) == 0 {
+            let _ = DeleteObject(full.into());
+        }
     }
 }
 
