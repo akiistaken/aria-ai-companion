@@ -13,7 +13,6 @@ slint = { version = "1.18", default-features = false, features = [
   "compat-1-18",
   "unstable-winit-030",
 ] }
-wry = { version = "0.57", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,7 +21,6 @@ rand = "0.9"
 log = "0.4"
 
 msedge-tts = { path = "../vendor/msedge-tts", default-features = false, features = ["blocking"] }
-tiny_http = "0.12"
 ureq = { version = "3", features = ["json"] }
 rodio = { version = "0.23", default-features = false, features = [
   "playback",

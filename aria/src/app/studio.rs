@@ -1,4 +1,4 @@
-//! Control Center wiring: pushes live state into the studio and handles every control.
+﻿//! Control Center wiring: pushes live state into the studio and handles every control.
 //!
 //! Callbacks run on the UI thread and reach the app through `post`, so no closure captures a
 //! Slint component or the app handle.
@@ -76,7 +76,7 @@ fn mask_key(key: &str) -> String {
             .into_iter()
             .rev()
             .collect();
-        format!("{start}Ã¢â‚¬Â¦{end}")
+        format!("{start}ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦{end}")
     } else {
         key.to_string()
     }
@@ -118,7 +118,7 @@ pub fn sync_studio(app: &AppHandle) {
                 icon: SharedString::from(e.icon),
                 title: SharedString::from(e.title),
                 tier: SharedString::from(e.tier),
-                level: SharedString::from(format!("Lv {} Ã‚Â· {}/100", e.level, e.progress)),
+                level: SharedString::from(format!("Lv {} Ãƒâ€šÃ‚Â· {}/100", e.level, e.progress)),
                 percent: (e.progress as f32 / 100.0).clamp(0.0, 1.0),
                 color,
                 tint: lighten(color, 0.5),
@@ -185,7 +185,6 @@ pub fn sync_studio(app: &AppHandle) {
 
     studio.set_tts_on(settings.tts_enabled);
     studio.set_wake_word(settings.wake_word_enabled);
-    studio.set_spectrum(settings.music_spectrum_enabled);
     studio.set_music_vibe(settings.music_vibe_enabled);
     studio.set_proactive(settings.proactive_enabled);
     studio.set_presence(settings.presence_guardian_enabled);
@@ -279,7 +278,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_clone_voice_file, || {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Audio", &["mp3", "wav", "flac", "ogg"])
-            .set_title("Pick a 5Ã¢â‚¬â€œ20 s clip of the voice to clone")
+            .set_title("Pick a 5ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“20 s clip of the voice to clone")
             .pick_file()
         {
             config::update(|s| {
@@ -288,7 +287,7 @@ pub fn wire_studio(studio: &ControlCenter) {
             with_app(|app| {
                 say(
                     app,
-                    &config::flav("Got your reference clip Ã¢â‚¬â€ I'll keep it for voice work."),
+                    &config::flav("Got your reference clip ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â I'll keep it for voice work."),
                     "happy",
                     vec![format!("reference clip: {}", path.display())],
                     false,
@@ -359,7 +358,6 @@ pub fn wire_studio(studio: &ControlCenter) {
         };
     }
 
-    toggle_field!(on_toggle_spectrum, music_spectrum_enabled, set_spectrum);
     toggle_field!(on_toggle_music_vibe, music_vibe_enabled, set_music_vibe);
     toggle_field!(on_toggle_proactive, proactive_enabled, set_proactive);
     toggle_field!(on_toggle_presence, presence_guardian_enabled, set_presence);
@@ -510,38 +508,9 @@ pub fn wire_studio(studio: &ControlCenter) {
             .pick_file()
         {
             config::update(|s| {
-                s.avatar_mode = "vrm".into();
                 s.custom_vrm_path = path.to_string_lossy().to_string();
             });
             with_app(|app| switch_avatar(app, "vrm"));
-        }
-    });
-
-    on!(on_load_live2d, || {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Live2D model", &["json"])
-            .set_title("Pick a .model3.json")
-            .pick_file()
-        {
-            config::update(|s| {
-                s.avatar_mode = "live2d".into();
-                s.live2d_source = path.to_string_lossy().to_string();
-            });
-            with_app(|app| switch_avatar(app, "live2d"));
-        }
-    });
-
-    on!(on_load_puppet, || {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Artwork", &["png", "webp", "jpg", "jpeg"])
-            .set_title("Pick character artwork")
-            .pick_file()
-        {
-            config::update(|s| {
-                s.avatar_mode = "puppet".into();
-                s.puppet_source = path.to_string_lossy().to_string();
-            });
-            with_app(|app| switch_avatar(app, "puppet"));
         }
     });
 
@@ -649,7 +618,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_add_todo, || {
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
-                s.set_status_text("Add tasks from the chat bar Ã¢â‚¬â€ say Ã¢â‚¬Å“todo add Ã¢â‚¬Â¦Ã¢â‚¬Â.".into());
+                s.set_status_text("Add tasks from the chat bar ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â say ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œtodo add ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â.".into());
             }
         });
     });

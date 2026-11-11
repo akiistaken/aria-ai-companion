@@ -7,7 +7,6 @@
 
 mod app;
 mod avatar_link;
-mod assets;
 mod audio;
 mod brain;
 mod config;
@@ -20,7 +19,6 @@ mod mood;
 mod offline;
 mod proactive;
 mod reactions;
-mod stage;
 mod sysinfo;
 mod tools;
 mod util;

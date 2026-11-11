@@ -1,4 +1,4 @@
-﻿//! Settings, persona definitions and shared paths.
+//! Settings, persona definitions and shared paths.
 //!
 //! The Python original spread this over ~40 getter/setter pairs. Here a single `Settings`
 //! struct is the source of truth; callers read fields directly from the shared snapshot.
@@ -200,17 +200,13 @@ pub struct Settings {
     pub input_audio_device: String,
     pub output_audio_device: String,
 
-    pub avatar_mode: String,
     pub avatar_scale: f32,
     pub avatar_props: serde_json::Map<String, serde_json::Value>,
     pub body_framing: String,
     pub camera_zoom: f32,
     pub camera_y_offset: f32,
-    pub live2d_source: String,
     pub custom_vrm_path: String,
-    pub puppet_source: String,
     pub stage_lighting: String,
-    pub music_spectrum_enabled: bool,
 
     pub subtitles_enabled: bool,
     pub bubble_offset: Option<[i32; 2]>,
@@ -246,17 +242,13 @@ impl Default for Settings {
             mic_mode: "click".into(),
             input_audio_device: String::new(),
             output_audio_device: String::new(),
-            avatar_mode: "live2d".into(),
             avatar_scale: 1.0,
             avatar_props: serde_json::Map::new(),
             body_framing: "half".into(),
             camera_zoom: 1.0,
             camera_y_offset: 0.0,
-            live2d_source: "/assets/models/witch_live2d/é­”å¥³.model3.json".into(),
             custom_vrm_path: String::new(),
-            puppet_source: "/assets/models/silver_witch.png".into(),
             stage_lighting: "auto".into(),
-            music_spectrum_enabled: true,
             subtitles_enabled: true,
             bubble_offset: None,
             bubble_custom_size: None,
@@ -469,9 +461,6 @@ impl Settings {
         }
         if !matches!(self.mic_mode.as_str(), "click" | "always_open" | "push_to_talk") {
             self.mic_mode = "click".into();
-        }
-        if !matches!(self.avatar_mode.as_str(), "live2d" | "vrm" | "puppet") {
-            self.avatar_mode = "live2d".into();
         }
         if !matches!(self.body_framing.as_str(), "full" | "half" | "face") {
             self.body_framing = "half".into();

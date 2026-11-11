@@ -1,4 +1,4 @@
-// Aria Control Center: a sidebar + content studio.
+﻿// Aria Control Center: a sidebar + content studio.
 //
 // Operate mode: density is welcome, novelty is not. One nav column, one content column, every
 // control has a visible label, and the live mood/emotion state is always on screen because that
@@ -372,7 +372,7 @@ component EmotionMeter inherits Rectangle {
         y: 0;
         width: parent.width;
         height: 18px;
-        text: data.tier + "  ·  " + data.level;
+        text: data.tier + "  Â·  " + data.level;
         color: data.tint;
         font-size: 10.5px;
         font-family: Theme.font-ui;
@@ -475,7 +475,6 @@ export component ControlCenter inherits Window {
 
     in property <bool> tts-on: true;
     in property <bool> wake-word: false;
-    in property <bool> spectrum: true;
     in property <bool> music-vibe: true;
     in property <bool> proactive: true;
     in property <bool> presence: true;
@@ -505,7 +504,6 @@ export component ControlCenter inherits Window {
     callback pick-mic-mode(int);
     callback pick-input(int);
     callback pick-output(int);
-    callback toggle-spectrum(bool);
     callback toggle-music-vibe(bool);
     callback toggle-proactive(bool);
     callback toggle-presence(bool);
@@ -526,8 +524,6 @@ export component ControlCenter inherits Window {
     callback set-avatar-scale(float);
     callback reset-camera();
     callback load-vrm();
-    callback load-live2d();
-    callback load-puppet();
     callback toggle-prop(string);
     callback headpat();
     callback tease();
@@ -583,7 +579,7 @@ export component ControlCenter inherits Window {
                     letter-spacing: -0.1px;
                 }
                 Text {
-                    text: root.mood-badge + "  ·  " + root.mood-reason + "  ·  " + root.affection-label;
+                    text: root.mood-badge + "  Â·  " + root.mood-reason + "  Â·  " + root.affection-label;
                     color: Theme.text-secondary;
                     font-size: 11.5px;
                     font-family: Theme.font-ui;
@@ -807,8 +803,6 @@ export component ControlCenter inherits Window {
                                 spacing: 8px;
                                 alignment: start;
                                 ActionButton { label: "Load VRM"; icon: Glyph.folder; clicked => { root.load-vrm(); } }
-                                ActionButton { label: "Load Live2D"; icon: Glyph.folder; clicked => { root.load-live2d(); } }
-                                ActionButton { label: "Load artwork"; icon: Glyph.folder; clicked => { root.load-puppet(); } }
                             }
                         }
                     }
@@ -988,7 +982,7 @@ export component ControlCenter inherits Window {
                                         width: parent.width - 240px;
                                         label: "";
                                         value: root.fact-draft;
-                                        placeholder: "Something to remember…";
+                                        placeholder: "Something to rememberâ€¦";
                                         edited(text) => { root.fact-draft = text; }
                                     }
                                     ActionButton {
@@ -1057,7 +1051,7 @@ export component ControlCenter inherits Window {
                                 spacing: 10px;
                                 ToggleRow {
                                     height: 30px;
-                                    label: "“Hey Aria” wake word";
+                                    label: "â€œHey Ariaâ€ wake word";
                                     hint: "Listen hands-free and answer when you say her name";
                                     checked: root.wake-word;
                                     toggled(v) => { root.toggle-wake-word(v); }
@@ -1126,12 +1120,6 @@ export component ControlCenter inherits Window {
                                         icon: Glyph.speaker;
                                         clicked => { root.pick-output(Math.mod(root.output-index + 1, Math.max(1, root.outputs.length))); }
                                     }
-                                }
-                                ToggleRow {
-                                    label: "Music spectrum";
-                                    hint: "Equalizer bars react to real desktop audio";
-                                    checked: root.spectrum;
-                                    toggled(v) => { root.toggle-spectrum(v); }
                                 }
                                 ToggleRow {
                                     label: "Vibe to your music";
@@ -1277,12 +1265,12 @@ export component ControlCenter inherits Window {
                                 FieldRow {
                                     label: "API key";
                                     value: root.api-key-masked;
-                                    placeholder: "Paste your key…";
+                                    placeholder: "Paste your keyâ€¦";
                                     edited(text) => { root.save-engine(root.base-url, text); }
                                 }
                                 Text {
                                     text: root.api-key-masked == ""
-                                        ? "No key set — Aria falls back to offline tools and local Ollama."
+                                        ? "No key set â€” Aria falls back to offline tools and local Ollama."
                                         : "A key is set. Offline tools still work without it.";
                                     color: Theme.text-muted;
                                     font-size: 10.5px;
@@ -1330,28 +1318,28 @@ export component ControlCenter inherits Window {
                                 width: parent.width - 28px;
                                 spacing: 5px;
                                 Text {
-                                    text: "Alt+Space — summon and focus the command bar";
+                                    text: "Alt+Space â€” summon and focus the command bar";
                                     color: Theme.text-secondary;
                                     font-size: 11px;
                                     font-family: Theme.font-ui;
                                     height: 16px;
                                 }
                                 Text {
-                                    text: "Ctrl+Shift+M — start or stop the microphone";
+                                    text: "Ctrl+Shift+M â€” start or stop the microphone";
                                     color: Theme.text-secondary;
                                     font-size: 11px;
                                     font-family: Theme.font-ui;
                                     height: 16px;
                                 }
                                 Text {
-                                    text: "Ctrl+Shift+C — open this studio";
+                                    text: "Ctrl+Shift+C â€” open this studio";
                                     color: Theme.text-secondary;
                                     font-size: 11px;
                                     font-family: Theme.font-ui;
                                     height: 16px;
                                 }
                                 Text {
-                                    text: "Middle-click her — quick-dial action ring";
+                                    text: "Middle-click her â€” quick-dial action ring";
                                     color: Theme.text-secondary;
                                     font-size: 11px;
                                     font-family: Theme.font-ui;
