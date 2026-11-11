@@ -12,6 +12,13 @@
 //!
 //! The window never takes focus (`WS_EX_NOACTIVATE`, `MA_NOACTIVATE`): clicking Aria must not pull
 //! the keyboard away from whatever the user is typing into.
+//!
+//! Once the app sends its mascot HWND, this window becomes an **owned** window of it. Before that,
+//! the two were unrelated top-level windows from two processes: each kept its own topmost slot and
+//! its own minimized state, so "show desktop" or another topmost window could take one away and
+//! leave the other. Owned, they share one z-order band and hide together, and the app moves both
+//! in a single `DeferWindowPos`, so this thread stops moving the window and `UpdateLayeredWindow`
+//! is called without a destination point (keep the current position).
 
 use std::sync::atomic::{AtomicI64, AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -25,8 +32,9 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowRect, PeekMessageW, RegisterClassW,
-    SWP_NOZORDER,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetWindowRect, MsgWaitForMultipleObjects,
+    PeekMessageW, PostMessageW, RegisterClassW, SetWindowLongPtrW, GWLP_HWNDPARENT, QS_ALLINPUT,
+    SWP_NOZORDER, WM_APP,
     SetWindowPos, ShowWindow, TranslateMessage, UpdateLayeredWindow, CW_USEDEFAULT, HWND_TOPMOST,
     MA_NOACTIVATE, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
     SW_HIDE, SW_SHOWNA, ULW_ALPHA, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
@@ -40,10 +48,33 @@ pub static HWND_OUT: AtomicIsize = AtomicIsize::new(0);
 /// thread the moment a `SetWindowRect` arrives, applied by the window thread within ~15 ms.
 static WANTED_POS: AtomicI64 = AtomicI64::new(i64::MIN);
 
-/// Requests a window position. The window thread is the only mover, so `UpdateLayeredWindow` and
-/// the move can never race each other.
+/// The mascot window that owns this one; 0 until the app sends it.
+static OWNER: AtomicIsize = AtomicIsize::new(0);
+
+/// Private message that only wakes the window thread; it has no handler.
+const WM_WAKE: u32 = WM_APP + 1;
+
+/// Wakes the window thread out of `MsgWaitForMultipleObjects` so queued work runs now.
+fn wake() {
+    let hwnd = HWND_OUT.load(Ordering::SeqCst);
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_WAKE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Requests a window position. Applied only while the window has no owner: after that the app
+/// moves the window itself, and a second mover here would race it.
 pub fn place(x: i32, y: i32) {
     WANTED_POS.store(((x as i64) << 32) | (y as u32 as i64), Ordering::SeqCst);
+    wake();
+}
+
+/// Makes the app's mascot window this window's owner.
+pub fn set_owner(owner: isize) {
+    OWNER.store(owner, Ordering::SeqCst);
+    wake();
 }
 
 fn wanted_pos() -> Option<(i32, i32)> {
@@ -99,14 +130,17 @@ impl LayeredSurface {
             return;
         }
         let _ = self.tx.send(Present::Frame { rgba, width, height });
+        wake();
     }
 
     pub fn show(&mut self) {
         let _ = self.tx.send(Present::Show);
+        wake();
     }
 
     pub fn hide(&mut self) {
         let _ = self.tx.send(Present::Hide);
+        wake();
     }
 
     pub fn hwnd_value() -> u64 {
@@ -117,6 +151,7 @@ impl LayeredSurface {
 impl Drop for LayeredSurface {
     fn drop(&mut self) {
         let _ = self.tx.send(Present::Stop);
+        wake();
         HWND_OUT.store(0, Ordering::SeqCst);
     }
 }
@@ -245,22 +280,16 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
         (rect.left, rect.top)
     };
 
-    loop {
-        // Follow the app's requested position immediately, not only on the next frame, so the
-        // avatar keeps up with its chrome while walking or being dragged.
-        if let Some(wanted) = wanted_pos().filter(|w| *w != pos) {
-            pos = wanted;
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    pos.0,
-                    pos.1,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
+    // The owner this window currently has (0 = none yet).
+    let mut owner: isize = 0;
+
+    'outer: loop {
+        // Sleep until a window message arrives (including the app's synchronous moves of this
+        // window, and `WM_WAKE` from the renderer) or 15 ms pass. Waiting on the message queue
+        // rather than the channel matters: the app now moves this window itself, and each of
+        // those moves waits for this thread to answer `WM_WINDOWPOSCHANGING`.
+        unsafe {
+            MsgWaitForMultipleObjects(None, false, 15, QS_ALLINPUT);
         }
 
         // Drain the window's messages first: this queue must stay serviced for
@@ -276,9 +305,72 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
             }
         }
 
-        // Block briefly for work instead of spinning: a paused avatar costs nothing here.
-        match rx.recv_timeout(std::time::Duration::from_millis(15)) {
-            Ok(Present::Frame { rgba, width: w, height: h }) => {
+        let wanted_owner = OWNER.load(Ordering::SeqCst);
+        if wanted_owner != owner {
+            owner = wanted_owner;
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner);
+                // Owner changes are cached until the next SetWindowPos; this also keeps the
+                // window in the topmost band its owner lives in.
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+            log::info!("avatar window owned by the mascot window ({owner})");
+        }
+
+        // Until owned, follow the app's requested position here. Once owned, the app moves this
+        // window in the same batch as its own, and moving it here as well would fight that.
+        if owner == 0 {
+            if let Some(wanted) = wanted_pos().filter(|w| *w != pos) {
+                pos = wanted;
+                unsafe {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        pos.0,
+                        pos.1,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
+        }
+
+        // Handle everything queued. Only the newest frame is worth drawing.
+        let mut latest: Option<(Vec<u8>, u32, u32)> = None;
+        loop {
+            match rx.try_recv() {
+                Ok(Present::Frame { rgba, width, height }) => latest = Some((rgba, width, height)),
+                Ok(Present::Show) => {
+                    hidden = false;
+                    if visible {
+                        unsafe {
+                            let _ = ShowWindow(hwnd, SW_SHOWNA);
+                        }
+                    }
+                }
+                Ok(Present::Hide) => unsafe {
+                    hidden = true;
+                    latest = None;
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                },
+                Ok(Present::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    break 'outer
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            }
+        }
+
+        if let Some((rgba, w, h)) = latest {
+            {
                 if hidden {
                     continue;
                 }
@@ -299,7 +391,14 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
                     continue;
                 };
                 premultiply_bgra(&rgba, d.pixels());
-                blit(hwnd, screen_dc, mem_dc, d.width, d.height, pos);
+                blit(
+                    hwnd,
+                    screen_dc,
+                    mem_dc,
+                    d.width,
+                    d.height,
+                    (owner == 0).then_some(pos),
+                );
                 if !visible {
                     unsafe {
                         let _ = ShowWindow(hwnd, SW_SHOWNA);
@@ -316,20 +415,6 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
                     visible = true;
                 }
             }
-            Ok(Present::Show) => {
-                hidden = false;
-                if visible {
-                    unsafe {
-                        let _ = ShowWindow(hwnd, SW_SHOWNA);
-                    }
-                }
-            }
-            Ok(Present::Hide) => unsafe {
-                hidden = true;
-                let _ = ShowWindow(hwnd, SW_HIDE);
-            },
-            Ok(Present::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
 
@@ -373,14 +458,24 @@ fn premultiply_bgra(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Pushes the DIB to the screen at `pos`, which this thread also used for its last `SetWindowPos`,
-/// so the two can never disagree.
-fn blit(hwnd: HWND, screen_dc: HDC, mem_dc: HDC, width: i32, height: i32, pos: (i32, i32)) {
+/// Pushes the DIB to the screen.
+///
+/// `pos` is `Some` only while this thread positions the window (no owner yet): it is the point of
+/// its last `SetWindowPos`, so the two can never disagree. Once the app moves the window, `None`
+/// tells `UpdateLayeredWindow` to keep the current position instead of snapping it back.
+fn blit(
+    hwnd: HWND,
+    screen_dc: HDC,
+    mem_dc: HDC,
+    width: i32,
+    height: i32,
+    pos: Option<(i32, i32)>,
+) {
     let size = SIZE {
         cx: width,
         cy: height,
     };
-    let dst = POINT { x: pos.0, y: pos.1 };
+    let dst = pos.map(|p| POINT { x: p.0, y: p.1 });
     let src = POINT { x: 0, y: 0 };
     let blend = BLENDFUNCTION {
         BlendOp: AC_SRC_OVER as u8,
@@ -392,7 +487,7 @@ fn blit(hwnd: HWND, screen_dc: HDC, mem_dc: HDC, width: i32, height: i32, pos: (
         UpdateLayeredWindow(
             hwnd,
             Some(screen_dc),
-            Some(&dst),
+            dst.as_ref().map(|p| p as *const POINT),
             Some(&size),
             Some(mem_dc),
             Some(&src),

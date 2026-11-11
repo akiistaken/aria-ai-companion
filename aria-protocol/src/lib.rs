@@ -68,9 +68,10 @@ pub enum Command {
     },
     /// 30 normal, 10 in game mode, 0 = paused (nothing rendered, window hidden).
     SetFps { fps: u32 },
-    /// Where the avatar window goes, in physical screen pixels. The renderer's window thread is
-    /// the only thing that moves the window (a second mover races `UpdateLayeredWindow`), and it
-    /// draws at exactly this size since a layered window shows its bitmap 1:1.
+    /// Where the avatar window goes, in physical screen pixels, and the size it draws at (a
+    /// layered window shows its bitmap 1:1). The renderer applies the position only until it has
+    /// an owner (see `SetOwner`); after that the app moves the window itself, in the same
+    /// `DeferWindowPos` batch as its own window.
     SetWindowRect {
         x: i32,
         y: i32,
@@ -93,6 +94,12 @@ pub enum Command {
     },
     /// Whether clicks should reach the desktop: false over empty space.
     SetClickThrough { enabled: bool },
+    /// Makes the avatar window an owned window of the app's mascot window (`hwnd`).
+    ///
+    /// Owned windows share their owner's z-order band and are hidden and minimized with it, so
+    /// the avatar and its chat chrome behave as one window. From then on the renderer stops
+    /// positioning its window and `UpdateLayeredWindow` keeps whatever position the app set.
+    SetOwner { hwnd: u64 },
     Shutdown,
 }
 

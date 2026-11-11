@@ -98,6 +98,10 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             }
             apply_render_policy(app);
             layout_windows(app);
+            // Tie the avatar window to the mascot window: one z-order band, hidden together.
+            if let Some(owner) = mascot_hwnd(&app.borrow().ui) {
+                stage.set_owner(owner);
+            }
         }
         Event::ModelLoaded { ok, error, .. } => {
             if ok {
@@ -120,10 +124,8 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
         Event::Shake => shake(app),
         Event::Headpat => headpat(app),
         Event::MiddleClick => open_quick_dial(app),
-        Event::ContextMenu => {
-            let cursor = crate::input::cursor_position();
-            open_context_menu(app, cursor);
-        }
+        // Right-click on the model shows the chat bar; its ⋯ button opens the menu.
+        Event::ContextMenu => show_bar(app),
         Event::HoverChanged { over } => {
             // Over the model the window must accept clicks; over empty space it must not, so the
             // desktop underneath stays usable.

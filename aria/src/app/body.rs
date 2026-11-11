@@ -3,6 +3,9 @@
 use super::*;
 
 pub(crate) fn setup_window(app: &AppHandle) {
+    // Note: this runs before the window is shown, when the winit window does not exist yet, so
+    // this closure is normally skipped. Topmost is enforced with Win32 instead
+    // (`ticks::apply_render_policy`), and frame/transparency in `main::setup_native_window`.
     app.borrow().ui.window().with_winit_window(|w| {
         w.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
         w.set_decorations(false);
@@ -124,12 +127,22 @@ pub(crate) fn window_size(app: &AppHandle) -> (i32, i32) {
 /// This is the single funnel for every movement path (walking, dragging, edge snap, game dodge,
 /// perch, boredom roam, initial placement), so the avatar can never drift away from its chrome.
 pub(crate) fn set_window_pos(app: &AppHandle, x: i32, y: i32) {
-    // Scope the read borrow so the write below cannot collide with it.
-    {
-        let a = app.borrow();
-        a.ui.window().set_position(PhysicalPosition::new(x, y));
-    }
     app.borrow_mut().pos = (x, y);
+    // Both windows move in one `DeferWindowPos` batch, so the avatar and its chat chrome land in
+    // the same frame. (Before, the chrome moved here and the avatar only when the renderer got
+    // round to a socket message, up to ~15 ms later, so they visibly came apart while walking or
+    // dragging.)
+    let mascot = mascot_hwnd(&app.borrow().ui).unwrap_or(0);
+    let avatar = app.borrow().stage.hwnd() as isize;
+    let (ax, ay, _, _) = avatar_rect(app);
+    let moved = mascot != 0
+        && crate::win32::move_windows_together(&[(mascot, x, y), (avatar, ax, ay)]);
+    if !moved {
+        app.borrow()
+            .ui
+            .window()
+            .set_position(PhysicalPosition::new(x, y));
+    }
     layout_windows(app);
 }
 
@@ -173,7 +186,11 @@ pub(crate) fn reset_pose(app: &AppHandle) {
 pub(crate) fn layout_windows(app: &AppHandle) {
     let (x, y, w, h) = avatar_rect(app);
     let stage = app.borrow().stage.clone();
+    // Size for the renderer (and the position, until its window is owned by ours).
     stage.set_window_rect(x, y, w, h);
+    // Re-seat the avatar on its slot as well: the stage slot can shift inside the mascot window
+    // (the bubble grows, the scale changes) without the mascot window itself moving.
+    crate::win32::move_windows_together(&[(stage.hwnd() as isize, x, y)]);
     cut_stage_hole(app);
 }
 
@@ -205,7 +222,8 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
         (a.ui.get_stage_w() * sf).round() as i32,
         (a.ui.get_stage_h() * sf).round() as i32,
     );
-    let key = (size.width as i32, size.height as i32, hole);
+    let bar_visible = a.ui.get_bar_visible();
+    let key = (size.width as i32, size.height as i32, hole, bar_visible);
     if a.region_key == Some(key) {
         return;
     }
@@ -213,7 +231,16 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
         return;
     };
     drop(a);
-    crate::win32::set_region_with_hole(hwnd, size.width as i32, size.height as i32, hole);
+    // While the bar is hidden its slot below the stage is empty; cut it out too, so the
+    // transparent strip does not swallow clicks meant for the desktop.
+    let below_stage = hole.1 + hole.3;
+    let bar_slot = (0, below_stage, size.width as i32, size.height as i32 - below_stage);
+    let holes: &[(i32, i32, i32, i32)] = if bar_visible {
+        &[hole]
+    } else {
+        &[hole, bar_slot]
+    };
+    crate::win32::set_region_with_holes(hwnd, size.width as i32, size.height as i32, holes);
     app.borrow_mut().region_key = Some(key);
 }
 
@@ -238,7 +265,10 @@ pub(crate) fn start_drag(app: &AppHandle) {
 }
 
 pub(crate) fn update_drag(app: &AppHandle, cursor: (i32, i32)) {
-    if let Some((win_x, win_y, cur_x, cur_y)) = app.borrow().drag_origin {
+    // Copy out first: a borrow in the `if let` scrutinee lives through the whole block (edition
+    // 2021), so `set_window_pos`'s `borrow_mut` would panic with "already borrowed".
+    let origin = app.borrow().drag_origin;
+    if let Some((win_x, win_y, cur_x, cur_y)) = origin {
         set_window_pos(app, win_x + (cursor.0 - cur_x), win_y + (cursor.1 - cur_y));
     }
 }
@@ -248,7 +278,27 @@ pub(crate) fn end_drag(app: &AppHandle) {
     app.borrow_mut().drag_origin = None;
     app.borrow_mut().stationary_since = Instant::now();
     app.borrow().stage.set_drag_inertia(0.0, 0.0);
+    // Never leave the chat bar off-screen: at large scales the window is nearly as tall as the
+    // screen, and a small drag down pushed the bar under the taskbar, so it looked like it had
+    // vanished. She walks back into the work area instead.
+    let pos = app.borrow().pos;
+    let inside = clamp_to_work_area(app, pos);
+    if inside != pos {
+        app.borrow_mut().target = Some(inside);
+    }
     check_edge_snap(app);
+}
+
+/// The closest window position that keeps the whole body usable: the chat bar and bubble inside
+/// the work area vertically (the bar wins when the window is taller than the screen), and at
+/// least half the width on screen so the bezel peek still works.
+pub(crate) fn clamp_to_work_area(app: &AppHandle, (x, y): (i32, i32)) -> (i32, i32) {
+    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let (w, h) = window_size(app);
+    let y_max = sy + sh - h;
+    let cy = if y_max < sy { y_max } else { y.clamp(sy, y_max) };
+    let cx = x.clamp(sx - w / 2, sx + sw - w / 2);
+    (cx, cy)
 }
 
 /// Magnetic bezel snapping with the peeking lean.
@@ -257,7 +307,11 @@ pub(crate) fn check_edge_snap(app: &AppHandle) {
         return;
     }
     let (sx, sy, sw, sh) = crate::win32::work_area();
-    let (x, y) = app.borrow().pos;
+    // Snap from where she is headed (e.g. back inside the work area), not where she was dropped.
+    let (x, y) = {
+        let a = app.borrow();
+        a.target.unwrap_or(a.pos)
+    };
     let (w, h) = window_size(app);
 
     const THRESHOLD: i32 = 55;

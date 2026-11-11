@@ -305,9 +305,21 @@ impl AvatarLink {
         });
     }
 
-    /// Places the avatar window. The app decides the geometry; the renderer's window thread
-    /// applies it, because a second process calling `SetWindowPos` races `UpdateLayeredWindow`
-    /// (which also sets the position) and could snap the window back.
+    /// Makes the avatar window an owned window of the mascot window, so the two share one
+    /// z-order band and hide together. Sent on every `Ready`: a restarted renderer has a new
+    /// window that knows nothing.
+    pub fn set_owner(&self, owner_hwnd: isize) {
+        if !self.is_ready() || owner_hwnd == 0 {
+            return;
+        }
+        self.send(Command::SetOwner {
+            hwnd: owner_hwnd as u64,
+        });
+    }
+
+    /// Tells the renderer the avatar window's rectangle. The size is what it renders at; the
+    /// position is applied by the renderer only until the window is owned (see `set_owner`),
+    /// after which `body::set_window_pos` moves it directly.
     pub fn set_window_rect(&self, x: i32, y: i32, width: i32, height: i32) {
         if !self.is_ready() || width <= 0 || height <= 0 {
             return;
@@ -360,8 +372,8 @@ fn supervise(
         }
 
         // The renderer connects back with a token as its first line.
-        let stream = match accept_with_token(&listener, &shared.token) {
-            Some(stream) => stream,
+        let (stream, mut reader) = match accept_with_token(&listener, &shared.token) {
+            Some(accepted) => accepted,
             None => {
                 log::warn!("avatar renderer did not connect properly");
                 kill_renderer(&shared);
@@ -377,17 +389,10 @@ fn supervise(
 
         log::info!("avatar renderer connected");
         let _ = stream.set_nodelay(true);
-        let reader_stream = match stream.try_clone() {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("avatar socket clone failed: {e}");
-                return;
-            }
-        };
         *shared.writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream);
 
-        // Read events until the renderer dies or the app shuts down.
-        let mut reader = BufReader::new(reader_stream);
+        // Read events until the renderer dies or the app shuts down. Same reader as the
+        // handshake, so nothing it already buffered is lost.
         let mut line = String::new();
         loop {
             line.clear();
@@ -531,7 +536,14 @@ fn listener_port(shared: &Shared) -> Option<u16> {
 }
 
 /// Accepts one connection and validates its `Hello` token.
-fn accept_with_token(listener: &TcpListener, expected: &str) -> Option<TcpStream> {
+///
+/// Returns the reader used for `Hello` along with the stream: the renderer often writes `Ready`
+/// right behind `Hello`, so that line may already sit in this reader's buffer. Dropping it lost
+/// `Ready` and left the avatar window unplaced.
+fn accept_with_token(
+    listener: &TcpListener,
+    expected: &str,
+) -> Option<(TcpStream, BufReader<TcpStream>)> {
     // Bound the wait: a renderer that never connects must not hang the supervisor forever.
     let deadline = Instant::now() + Duration::from_secs(30);
     listener.set_nonblocking(true).ok()?;
@@ -545,7 +557,9 @@ fn accept_with_token(listener: &TcpListener, expected: &str) -> Option<TcpStream
                     return None;
                 }
                 match Event::from_line(line.trim()) {
-                    Some(Event::Hello { token }) if token == expected => return Some(stream),
+                    Some(Event::Hello { token }) if token == expected => {
+                        return Some((stream, reader))
+                    }
                     _ => {
                         log::warn!("dropping avatar connection with a bad token");
                         return None;

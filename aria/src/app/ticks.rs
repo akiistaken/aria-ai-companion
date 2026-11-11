@@ -127,6 +127,14 @@ pub(crate) fn tick_motion(app: &AppHandle) {
 /// Render policy, re-evaluated every second: pause while the session is locked or the mascot is
 /// not on screen, 10 FPS while a game has the foreground, 30 otherwise.
 pub(crate) fn apply_render_policy(app: &AppHandle) {
+    // Keep the mascot window (bubble + chat bar) in the topmost band. The avatar window is owned
+    // by it and sits in that band too; if the mascot ever dropped out, other apps would cover the
+    // chat chrome while the avatar stayed on top, and the two would look unrelated.
+    if let Some(mascot) = mascot_hwnd(&app.borrow().ui) {
+        if crate::win32::ensure_topmost(mascot) {
+            log::info!("mascot window was not topmost; restored");
+        }
+    }
     let hidden = !app.borrow().ui.window().is_visible() || crate::win32::session_locked();
     let fps = if hidden {
         0
@@ -248,7 +256,8 @@ pub(crate) fn apply_game_state(app: &AppHandle, detection: (bool, String)) {
         set_peeking(app, "none");
         let scale = app.borrow().pre_game_scale;
         apply_scale(app, scale);
-        if let Some(pos) = app.borrow().pre_game_pos {
+        let pre_game_pos = app.borrow().pre_game_pos;
+        if let Some(pos) = pre_game_pos {
             app.borrow_mut().target = Some(pos);
         }
         say(
@@ -408,22 +417,34 @@ pub(crate) fn tick_ui(app: &AppHandle) {
     apply_persona(app);
 }
 
-/// Capsule auto-collapse follows the cursor, unless the user pinned the bar open.
+/// How long the chat bar stays up with nothing going on.
+pub(crate) const BAR_IDLE_HIDE: Duration = Duration::from_secs(8);
+
+/// Hides the chat bar once it has sat idle for `BAR_IDLE_HIDE`.
+///
+/// The bar only appears on right-click (or Alt+Space). It counts as in use while the cursor is
+/// over Aria, there is unsent text, she is thinking or listening, or its menu is open.
 pub(crate) fn tick_hover(app: &AppHandle) {
-    let settings = config::get();
-    if !settings.input_bar_visible || !settings.capsule_mode || !settings.capsule_autohide {
-        return;
-    }
-    if app.borrow().bar_pinned_open || app.borrow().dragging {
+    if !app.borrow().ui.get_bar_visible() || !config::get().capsule_autohide {
         return;
     }
     let (x, y) = app.borrow().pos;
     let (w, h) = window_size(app);
     let cursor = crate::input::cursor_position();
-    let inside = cursor.0 >= x && cursor.0 <= x + w && cursor.1 >= y && cursor.1 <= y + h;
-    if app.borrow().ui.get_bar_visible() != inside {
-        app.borrow().ui.set_bar_visible(inside);
-        sync_chrome(app);
+    let hovered = cursor.0 >= x && cursor.0 <= x + w && cursor.1 >= y && cursor.1 <= y + h;
+    let in_use = {
+        let a = app.borrow();
+        hovered
+            || a.dragging
+            || a.busy
+            || !a.ui.get_draft().is_empty()
+            || crate::voice::is_recording()
+            || a.menu.as_ref().is_some_and(|m| m.window().is_visible())
+    };
+    if in_use {
+        app.borrow_mut().bar_activity = Instant::now();
+    } else if app.borrow().bar_activity.elapsed() >= BAR_IDLE_HIDE {
+        hide_bar(app);
     }
 }
 

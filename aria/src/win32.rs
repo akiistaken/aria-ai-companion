@@ -546,23 +546,94 @@ pub fn session_locked() -> bool {
     win.exe.eq_ignore_ascii_case("LockApp.exe")
 }
 
-/// Gives a window a hit/paint region of its full rect minus one hole `(x, y, w, h)`, in window
-/// pixels. Clicks inside the hole fall through to whatever is underneath.
-pub fn set_region_with_hole(hwnd: isize, width: i32, height: i32, hole: (i32, i32, i32, i32)) {
+/// Gives a window a hit/paint region of its full rect minus some holes `(x, y, w, h)`, in window
+/// pixels. Clicks inside a hole fall through to whatever is underneath.
+pub fn set_region_with_holes(hwnd: isize, width: i32, height: i32, holes: &[(i32, i32, i32, i32)]) {
     use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF};
     if hwnd == 0 || width <= 0 || height <= 0 {
         return;
     }
     unsafe {
         let full = CreateRectRgn(0, 0, width, height);
-        let cut = CreateRectRgn(hole.0, hole.1, hole.0 + hole.2, hole.1 + hole.3);
-        CombineRgn(Some(full), Some(full), Some(cut), RGN_DIFF);
-        let _ = DeleteObject(cut.into());
+        for hole in holes.iter().filter(|h| h.2 > 0 && h.3 > 0) {
+            let cut = CreateRectRgn(hole.0, hole.1, hole.0 + hole.2, hole.1 + hole.3);
+            CombineRgn(Some(full), Some(full), Some(cut), RGN_DIFF);
+            let _ = DeleteObject(cut.into());
+        }
         // On success the system owns `full`; it must not be deleted here.
         if SetWindowRgn(HWND(hwnd as *mut _), Some(full), true) == 0 {
             let _ = DeleteObject(full.into());
         }
     }
+}
+
+/// Moves several top-level windows in one `DeferWindowPos` batch, so they land in the same
+/// frame and can never be seen apart. Positions are physical screen pixels; sizes and z-order
+/// are left alone. Windows with a zero handle are skipped.
+///
+/// Returns false when the batch could not be applied (the caller falls back to moving windows
+/// one by one).
+pub fn move_windows_together(moves: &[(isize, i32, i32)]) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
+        SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let moves: Vec<_> = moves.iter().filter(|m| m.0 != 0).collect();
+    if moves.is_empty() {
+        return true;
+    }
+    unsafe {
+        let Ok(mut batch) = BeginDeferWindowPos(moves.len() as i32) else {
+            return false;
+        };
+        for &&(hwnd, x, y) in &moves {
+            match DeferWindowPos(
+                batch,
+                HWND(hwnd as *mut _),
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE,
+            ) {
+                Ok(next) => batch = next,
+                // On failure the batch is already freed by the system.
+                Err(_) => return false,
+            }
+        }
+        EndDeferWindowPos(batch).is_ok()
+    }
+}
+
+/// Makes sure a window sits in the topmost z-order band, without activating it.
+///
+/// Returns true when it had to fix it. Cheap enough for a once-a-second check: the common case is
+/// a single `GetWindowLongW`.
+pub fn ensure_topmost(hwnd: isize) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, WS_EX_TOPMOST,
+    };
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe {
+        let handle = HWND(hwnd as *mut _);
+        if GetWindowLongW(handle, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as i32 != 0 {
+            return false;
+        }
+        let _ = SetWindowPos(
+            handle,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+    true
 }
 
 /// Enables or disables click-through on the avatar window.

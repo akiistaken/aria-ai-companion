@@ -24,6 +24,12 @@ try {
     $exe = Join-Path $root "target\$sub\aria.exe"
     if (-not (Test-Path $exe)) { throw "missing $exe" }
 
+    # Binaries inherit the repo folder's Low integrity label (left by a sandboxed tool), and a
+    # Low-integrity process cannot write to %APPDATA%: no log, no TTS cache, so no voice.
+    foreach ($bin in @($exe, (Join-Path $root "target\$sub\aria-avatar.exe"))) {
+        if (Test-Path $bin) { icacls $bin /setintegritylevel M | Out-Null }
+    }
+
     Write-Host "Launching $exe" -ForegroundColor Cyan
     Start-Process -FilePath $exe -WorkingDirectory $root
 }

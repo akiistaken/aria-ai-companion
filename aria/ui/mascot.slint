@@ -8,22 +8,26 @@ component RoundButton inherits Rectangle {
     in property <bool> danger: false;
     in property <string> icon: "";
     in property <bool> enabled: true;
+    in property <length> icon-weight: 1.7px;
     callback activated();
 
-    width: 28px;
-    height: 28px;
+    width: 30px;
+    height: 30px;
     border-radius: Theme.r-sm;
-    background: touch.pressed && root.enabled
-        ? (root.danger ? Theme.danger : Accent.wash)
+    background: root.active && root.danger ? Theme.danger-wash
         : (root.active ? Accent.wash : (touch.has-hover && root.enabled ? Theme.surface-raised : transparent));
     border-width: 1px;
-    border-color: root.active ? Accent.edge : (touch.has-hover && root.enabled ? Theme.hairline-strong : Theme.hairline);
+    border-color: root.active && root.danger ? Theme.danger-edge
+        : (root.active ? Accent.edge : (touch.has-hover && root.enabled ? Theme.hairline-strong : transparent));
     opacity: root.enabled ? 1.0 : 0.35;
+    animate background { duration: 110ms; easing: ease-out; }
 
     Icon {
         d: root.icon;
         size: 16px;
-        tint: root.active || touch.pressed ? Theme.accent : (touch.has-hover && root.enabled ? Theme.text : Theme.text-secondary);
+        weight: root.icon-weight;
+        tint: root.active && root.danger ? Theme.danger
+            : (root.active ? Theme.accent : (touch.has-hover && root.enabled ? Theme.text : Theme.text-secondary));
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
     }
@@ -50,148 +54,91 @@ component CommandBar inherits Rectangle {
     callback toggle-tts();
     callback toggle-subtitles();
     callback open-studio();
+    callback open-menu();
     callback collapse();
 
-    height: 40px;
+    height: 42px;
     border-radius: Theme.r-md;
     background: Theme.surface;
     border-width: 1px;
-    border-color: field.has-focus ? Accent.edge : Theme.hairline;
+    border-color: field.has-focus ? Accent.edge : Theme.hairline-strong;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: #00000066;
+
+    function submit() {
+        if (root.draft != "" && !root.busy) {
+            root.send(root.draft);
+            root.draft = "";
+        }
+    }
 
     HorizontalLayout {
-        padding-left: 5px;
-        padding-right: 5px;
-        padding-top: 5px;
-        padding-bottom: 5px;
+        padding: 5px;
         spacing: 2px;
-        alignment: start;
 
         RoundButton { icon: Glyph.eye; active: root.vision; activated => { root.toggle-vision(); } }
-        RoundButton { icon: Glyph.mic; active: root.recording; danger: root.recording; activated => { root.toggle-mic(); } }
+        RoundButton { icon: Glyph.mic; active: root.recording; danger: true; activated => { root.toggle-mic(); } }
         RoundButton { icon: root.tts ? Glyph.speaker : Glyph.speaker-off; active: root.tts; activated => { root.toggle-tts(); } }
         RoundButton { icon: Glyph.bubble; active: root.subtitles; activated => { root.toggle-subtitles(); } }
         RoundButton { icon: Glyph.sliders; activated => { root.open-studio(); } }
 
-        field := TextInput {
-            width: parent.width - 28px * 6 - 12px;
-            height: parent.height - 10px;
-            vertical-alignment: center;
-            text: root.draft;
-            font-size: 12.5px;
-            font-family: Theme.font-ui;
-            color: Theme.text;
-            single-line: true;
-            enabled: !root.busy;
-            edited => { root.draft = field.text; }
-            accepted => {
-                if (root.draft != "") {
-                    root.send(root.draft);
-                    root.draft = "";
-                }
+        // Divider between tools and the prompt.
+        Rectangle {
+            width: 9px;
+            Rectangle {
+                x: 4px;
+                y: 6px;
+                width: 1px;
+                height: parent.height - 12px;
+                background: Theme.hairline-strong;
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: 40px;
+
+            Text {
+                x: 4px;
+                width: parent.width - 8px;
+                height: parent.height;
+                text: root.busy ? "Aria is thinking…" : "Ask Aria anything…";
+                color: Theme.text-muted;
+                font-size: 12.5px;
+                font-family: Theme.font-ui;
+                vertical-alignment: center;
+                overflow: elide;
+                visible: root.draft == "";
+            }
+
+            field := TextInput {
+                x: 4px;
+                width: parent.width - 8px;
+                height: parent.height;
+                vertical-alignment: center;
+                text: root.draft;
+                font-size: 12.5px;
+                font-family: Theme.font-ui;
+                color: Theme.text;
+                selection-background-color: Accent.edge;
+                selection-foreground-color: Theme.text;
+                single-line: true;
+                enabled: !root.busy;
+                edited => { root.draft = field.text; }
+                accepted => { root.submit(); }
             }
         }
 
         RoundButton {
-            icon: Glyph.plus;
+            icon: Glyph.send;
             active: root.draft != "";
             enabled: !root.busy;
-            activated => {
-                if (root.draft != "") {
-                    root.send(root.draft);
-                    root.draft = "";
-                }
-            }
+            activated => { root.submit(); }
         }
-        RoundButton { icon: Glyph.close; activated => { root.collapse(); } }
-    }
-
-    Text {
-        x: 177px;
-        y: 0;
-        height: parent.height;
-        width: parent.width - 195px;
-        text: root.busy ? "Aria is thinking…" : "Ask Aria anything…";
-        color: Theme.text-muted;
-        font-size: 12.5px;
-        font-family: Theme.font-ui;
-        vertical-alignment: center;
-        visible: root.draft == "";
-    }
-}
-
-// Collapsed pill.
-component Capsule inherits Rectangle {
-    in property <string> status: "Standing by";
-    in property <string> persona: "TSUNDERE";
-    in property <bool> listening: false;
-    callback expand();
-    callback mic();
-
-    height: 30px;
-    width: Math.max(180px, 76px + persona-label.preferred-width + status-label.preferred-width);
-    border-radius: Theme.r-pill;
-    background: Theme.surface;
-    border-width: 1px;
-    border-color: hover.has-hover ? Theme.hairline-strong : Theme.hairline;
-
-    HorizontalLayout {
-        padding-left: 11px;
-        padding-right: 6px;
-        padding-top: 5px;
-        padding-bottom: 5px;
-        spacing: 7px;
-        alignment: start;
-
-        Rectangle {
-            width: 6px;
-            height: 6px;
-            border-radius: 3px;
-            background: root.listening ? Theme.danger : Theme.accent;
-        }
-
-        persona-label := Text {
-            text: root.persona;
-            color: Theme.text-muted;
-            font-size: 9.5px;
-            font-weight: 700;
-            letter-spacing: 0.7px;
-            vertical-alignment: center;
-        }
-
-        status-label := Text {
-            text: root.status;
-            color: Theme.text-secondary;
-            font-size: 11.5px;
-            font-family: Theme.font-ui;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-
-        Rectangle {
-            width: 20px;
-            height: 20px;
-            border-radius: 10px;
-            background: mic-hit.has-hover ? Accent.wash : transparent;
-            border-width: 1px;
-            border-color: mic-hit.has-hover ? Accent.edge : transparent;
-
-            Icon {
-                d: Glyph.mic;
-                size: 12px;
-                tint: mic-hit.has-hover ? Theme.accent : Theme.text-secondary;
-                x: (parent.width - self.width) / 2;
-                y: (parent.height - self.height) / 2;
-            }
-            mic-hit := TouchArea {
-                mouse-cursor: pointer;
-                clicked => { root.mic(); }
-            }
-        }
-    }
-
-    hover := TouchArea {
-        mouse-cursor: pointer;
-        clicked => { root.expand(); }
+        // The menu that right-click used to open, now that right-click shows this bar.
+        RoundButton { icon: Glyph.more; icon-weight: 2.2px; activated => { root.open-menu(); } }
+        RoundButton { icon: Glyph.chevron; activated => { root.collapse(); } }
     }
 }
 
@@ -205,7 +152,8 @@ export component MascotWindow inherits Window {
     out property <length> stage-x: (root.width - root.stage-w) / 2;
     out property <length> stage-y: root.bubble-slot-height;
 
-    in property <bool> bar-visible: true;
+    // Hidden until right-click on the avatar (or Alt+Space); auto-hides when idle.
+    in property <bool> bar-visible: false;
     in property <bool> capsule-mode: true;
     in property <bool> subtitles: true;
     in property <bool> tts: true;
@@ -233,6 +181,7 @@ export component MascotWindow inherits Window {
     callback open-studio();
     callback collapse-bar();
     callback expand-bar();
+    callback open-menu();
     callback open-quick-dial();
     callback context-menu(Point);
 
@@ -240,7 +189,10 @@ export component MascotWindow inherits Window {
     height: root.stage-h + root.bubble-slot-height + chrome-height + 10px;
 
     out property <length> bubble-slot-height: root.subtitles && root.bubble-shown ? bubble-view.height + 8px : 0px;
-    out property <length> chrome-height: root.bar-visible || !root.capsule-mode ? 44px : 34px;
+    // The bar's slot is always reserved, so showing or hiding the bar never resizes the window
+    // or moves the avatar. While the bar is hidden, Rust cuts the slot out of the window region
+    // so it does not catch clicks.
+    out property <length> chrome-height: 44px;
 
     changed accent-color => { Theme.accent = root.accent-color; }
     changed accent-wash => { Accent.wash = root.accent-wash; }
@@ -291,8 +243,8 @@ export component MascotWindow inherits Window {
 
             CommandBar {
                 x: (parent.width - self.width) / 2;
-                y: 2px;
-                width: root.stage-w;
+                y: 1px;
+                width: min(root.stage-w, 420px);
                 draft <=> root.draft;
                 vision: root.vision;
                 recording: root.recording;
@@ -305,25 +257,14 @@ export component MascotWindow inherits Window {
                 toggle-tts => { root.toggle-tts(); }
                 toggle-subtitles => { root.toggle-subtitles(); }
                 open-studio => { root.open-studio(); }
+                open-menu => { root.open-menu(); }
                 collapse => { root.collapse-bar(); }
-                visible: root.bar-visible || !root.capsule-mode;
-            }
-
-            Capsule {
-                x: (parent.width - self.width) / 2;
-                y: 2px;
-                width: root.stage-w;
-                persona: root.persona-badge;
-                status: root.status-line;
-                listening: root.recording;
-                expand => { root.expand-bar(); }
-                mic => { root.toggle-mic(); }
-                visible: !root.bar-visible && root.capsule-mode;
+                visible: root.bar-visible;
             }
         }
     }
 
-    // Double-clicking her frame opens the action ring; right-click opens the menu.
+    // Double-clicking her frame opens the action ring; right-click shows the chat bar.
     TouchArea {
         x: 0;
         y: root.stage-y;

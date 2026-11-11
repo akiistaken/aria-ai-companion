@@ -85,20 +85,27 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
     {
         let app = app.clone();
         if let Some(ui) = weak.upgrade() {
-            ui.on_collapse_bar(move || {
-                app.borrow().ui.set_bar_visible(false);
-                app.borrow_mut().bar_pinned_open = false;
-                sync_chrome(&app);
-            });
+            ui.on_collapse_bar(move || hide_bar(&app));
         }
     }
     {
         let app = app.clone();
         if let Some(ui) = weak.upgrade() {
-            ui.on_expand_bar(move || {
-                app.borrow().ui.set_bar_visible(true);
-                app.borrow_mut().bar_pinned_open = true;
-                sync_chrome(&app);
+            ui.on_expand_bar(move || show_bar(&app));
+        }
+    }
+    {
+        let app = app.clone();
+        if let Some(ui) = weak.upgrade() {
+            // The ⋯ button: the menu right-click used to open.
+            ui.on_open_menu(move || {
+                // Open just above the bar, so the menu never covers the bar or hides behind it.
+                let cursor = crate::input::cursor_position();
+                let (_, y) = app.borrow().pos;
+                let (_, h) = window_size(&app);
+                let sf = app.borrow().ui.window().scale_factor();
+                let bar_top = y + h - (53.0 * sf).round() as i32;
+                open_context_menu(&app, (cursor.0, bar_top - (6.0 * sf).round() as i32));
             });
         }
     }
@@ -164,17 +171,31 @@ pub(crate) fn install_hotkeys() {
     });
 }
 
+/// Shows the chat bar (right-click on the avatar, Alt+Space) and restarts its idle timer.
+pub(crate) fn show_bar(app: &AppHandle) {
+    app.borrow_mut().bar_activity = Instant::now();
+    if !app.borrow().ui.get_bar_visible() {
+        app.borrow().ui.set_bar_visible(true);
+        sync_chrome(app);
+    }
+}
+
+pub(crate) fn hide_bar(app: &AppHandle) {
+    if app.borrow().ui.get_bar_visible() {
+        app.borrow().ui.set_bar_visible(false);
+        sync_chrome(app);
+    }
+}
+
 pub(crate) fn summon(app: &AppHandle) {
     let _ = app.borrow().ui.window().show();
-    app.borrow().ui.set_bar_visible(true);
     let pos = app.borrow().pos;
     let _ = app
         .borrow()
         .ui
         .window()
         .set_position(PhysicalPosition::new(pos.0, pos.1));
-    sync_chrome(app);
-    app.borrow_mut().bar_pinned_open = true;
+    show_bar(app);
     say(
         app,
         &config::flav("You summoned me with Alt+Space. Tell me what you need."),
@@ -224,12 +245,24 @@ pub(crate) fn open_quick_dial(app: &AppHandle) {
     app.borrow_mut().dial = Some(dial);
 }
 
+/// Places the menu inside the work area. It opens from the chat bar's ⋯ button with `at` just
+/// above the bar, so it opens upward (above `at`) and only drops below when there is no room
+/// above; it grows to the right of `at` unless that would leave the screen.
+fn place_menu(menu: &ContextMenu, at: (i32, i32)) {
+    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let size = menu.window().size();
+    let (w, h) = (size.width as i32, size.height as i32);
+    let x = if at.0 + w <= sx + sw { at.0 } else { at.0 - w };
+    let y = if at.1 - h >= sy { at.1 - h } else { at.1 };
+    let x = x.clamp(sx, (sx + sw - w).max(sx));
+    let y = y.clamp(sy, (sy + sh - h).max(sy));
+    let _ = menu.window().set_position(PhysicalPosition::new(x, y));
+}
+
 pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
     if let Some(menu) = app.borrow().menu.as_ref() {
         let _ = menu.window().show();
-        let _ = menu
-            .window()
-            .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
+        place_menu(menu, at);
         return;
     }
     let menu = match ContextMenu::new() {
@@ -244,6 +277,8 @@ pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
         .window()
         .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
     menu.show().ok();
+    // Its size is only known once shown.
+    place_menu(&menu, at);
     app.borrow_mut().menu = Some(menu);
     apply_persona(app);
 }
@@ -268,12 +303,11 @@ pub(crate) fn wire_menu(menu: &ContextMenu) {
         menu.on_toggle_chatbox(move || {
             hide_window_of(&weak);
             post(|app| {
-                let next = !config::get().input_bar_visible;
-                config::update(|s| s.input_bar_visible = next);
-                app.borrow().ui.set_bar_visible(next);
-                app.borrow_mut().bar_pinned_open = next;
-                sync_chrome(app);
-                sync_studio(app);
+                if app.borrow().ui.get_bar_visible() {
+                    hide_bar(app);
+                } else {
+                    show_bar(app);
+                }
             });
         });
     }

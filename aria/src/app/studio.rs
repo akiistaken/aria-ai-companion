@@ -404,9 +404,11 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_toggle_chatbox, |on| {
         config::update(|s| s.input_bar_visible = on);
         with_app(|app| {
-            app.borrow().ui.set_bar_visible(on);
-            app.borrow_mut().bar_pinned_open = on;
-            crate::app::sync_chrome(app);
+            if on {
+                crate::app::show_bar(app);
+            } else {
+                crate::app::hide_bar(app);
+            }
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_chatbox(on);
             }

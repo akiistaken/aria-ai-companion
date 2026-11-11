@@ -10,7 +10,7 @@ component MenuItem inherits Rectangle {
     callback activated();
 
     height: 32px;
-    background: hit.has-hover ? Theme.surface-raised : transparent;
+    background: hit.has-hover ? (root.danger ? Theme.danger-wash : Theme.surface-raised) : transparent;
     border-radius: 6px;
 
     Icon {
@@ -34,11 +34,11 @@ component MenuItem inherits Rectangle {
     }
     Text {
         x: 34px;
-        width: parent.width - 50px;
+        width: parent.width - 44px;
         height: parent.height;
         text: root.accent-text;
         color: Theme.text-muted;
-        font-size: 12px;
+        font-size: 11px;
         font-family: Theme.font-ui;
         vertical-alignment: center;
         horizontal-alignment: right;
@@ -59,8 +59,11 @@ component Divider inherits Rectangle {
 export component ContextMenu inherits Window {
     title: "Aria";
     background: transparent;
+    // A popup, not a window: no title bar, and above the avatar (which is topmost).
+    no-frame: true;
+    always-on-top: true;
     width: 268px;
-    height: layout.preferred-height + 12px;
+    height: layout.preferred-height + 18px;
 
     in-out property <color> accent-color: #38bdf8;
     in-out property <color> accent-wash: #12232c;
@@ -103,9 +106,9 @@ export component ContextMenu inherits Window {
         drop-shadow-color: #000000a0;
 
         layout := VerticalLayout {
-            x: 6px;
-            y: 6px;
-            width: parent.width - 12px;
+            x: 5px;
+            y: 5px;
+            width: parent.width - 10px;
             spacing: 1px;
 
             // Mood header
@@ -113,17 +116,17 @@ export component ContextMenu inherits Window {
                 height: 34px;
                 background: transparent;
                 HorizontalLayout {
-                    x: 6px;
-                    width: parent.width - 12px;
-                    height: parent.height;
+                    padding-left: 10px;
+                    padding-right: 10px;
                     spacing: 8px;
-                    alignment: start;
-                    Rectangle {
-                        width: 6px;
-                        height: 6px;
-                        border-radius: 3px;
-                        y: (parent.height - 6px) / 2;
-                        background: Theme.accent;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: Theme.accent;
+                        }
                     }
                     Text {
                         text: root.mood-badge;
@@ -140,7 +143,7 @@ export component ContextMenu inherits Window {
                         font-family: Theme.font-ui;
                         vertical-alignment: center;
                         horizontal-alignment: right;
-                        width: parent.width;
+                        horizontal-stretch: 1;
                     }
                 }
             }
@@ -148,11 +151,6 @@ export component ContextMenu inherits Window {
             Divider { }
 
             MenuItem { label: "Ask Aria"; icon: Glyph.bubble; accent-text: "Alt+Space"; activated => { root.summon(); } }
-            MenuItem {
-                label: "Show chat box";
-                icon: Glyph.eye;
-                activated => { root.toggle-chatbox(); }
-            }
             MenuItem {
                 label: root.mic-open ? "Mic: open (VAD)" : "Mic: click to talk";
                 icon: Glyph.mic;

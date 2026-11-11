@@ -3,6 +3,9 @@
 // Operate mode: density is welcome, novelty is not. One nav column, one content column, every
 // control has a visible label, and the live mood/emotion state is always on screen because that
 // is the thing you come here to read.
+//
+// Layout rule: nothing in here carries a hard-coded height that has to agree with its content.
+// Cards, rows and sections size from their children, so copy can change without clipping.
 
 import { Theme, Accent, Glyph, Icon } from "tokens.slint";
 import { ScrollView } from "std-widgets.slint";
@@ -58,12 +61,63 @@ export component SectionTitle inherits Text {
     horizontal-alignment: left;
 }
 
+// Heading + body. Sections are spaced wider than a heading is from its own card.
+component Section inherits VerticalLayout {
+    in property <string> title;
+    in property <string> note: "";
+    spacing: 8px;
+
+    VerticalLayout {
+        spacing: 2px;
+        SectionTitle { title: root.title; }
+        if root.note != "" : Text {
+            text: root.note;
+            color: Theme.text-muted;
+            font-size: 11.5px;
+            font-family: Theme.font-ui;
+            wrap: word-wrap;
+        }
+    }
+    @children
+}
+
+// A surface that sizes from its content.
 component Card inherits Rectangle {
+    in property <length> pad-x: 16px;
+    in property <length> pad-y: 14px;
+    in property <length> gap: 12px;
+
     background: Theme.surface;
     border-radius: Theme.r-md;
     border-width: 1px;
     border-color: Theme.hairline;
-    min-height: 0;
+
+    VerticalLayout {
+        padding-left: root.pad-x;
+        padding-right: root.pad-x;
+        padding-top: root.pad-y;
+        padding-bottom: root.pad-y;
+        spacing: root.gap;
+        @children
+    }
+}
+
+// Label column + control. Labels share one width so controls line up down a card.
+component FormRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 12px;
+    min-height: 34px;
+
+    Text {
+        width: 88px;
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 12px;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    @children
 }
 
 // A labelled switch row. The whole row is the hit target.
@@ -71,46 +125,53 @@ component ToggleRow inherits Rectangle {
     in property <string> label;
     in property <string> hint: "";
     in property <bool> checked: false;
+    in property <bool> divider: false;
     callback toggled(bool);
 
-    height: 46px;
+    height: root.hint == "" ? 44px : 54px;
     background: row.has-hover ? Theme.surface-raised : transparent;
     border-radius: Theme.r-sm;
 
+    Rectangle {
+        x: 12px;
+        y: 0;
+        width: parent.width - 24px;
+        height: 1px;
+        background: Theme.hairline;
+        visible: root.divider && !row.has-hover;
+    }
+
     VerticalLayout {
         x: 12px;
-        width: parent.width - 76px;
+        width: parent.width - 80px;
         y: 0;
         height: parent.height;
         alignment: center;
-        spacing: 1px;
+        spacing: 2px;
 
         Text {
             text: root.label;
             color: Theme.text;
-            font-size: 12px;
+            font-size: 12.5px;
             font-family: Theme.font-ui;
             horizontal-alignment: left;
-            vertical-alignment: bottom;
             wrap: no-wrap;
             overflow: elide;
         }
-        Text {
+        if root.hint != "" : Text {
             text: root.hint;
             color: Theme.text-muted;
-            font-size: 10.5px;
+            font-size: 11.5px;
             font-family: Theme.font-ui;
             horizontal-alignment: left;
-            vertical-alignment: top;
             wrap: no-wrap;
             overflow: elide;
-            visible: root.hint != "";
         }
     }
 
     // Switch track
     Rectangle {
-        x: parent.width - 54px;
+        x: parent.width - 52px;
         y: (parent.height - 22px) / 2;
         width: 38px;
         height: 22px;
@@ -129,7 +190,7 @@ component ToggleRow inherits Rectangle {
             x: root.checked ? parent.width - 18px : 2px;
             border-radius: 8px;
             background: root.checked ? Theme.canvas : Theme.text-secondary;
-            animate x { duration: 140ms; easing: ease-out; }
+            animate x { duration: 160ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
         }
     }
 
@@ -139,42 +200,54 @@ component ToggleRow inherits Rectangle {
     }
 }
 
-component SegmentedChoice inherits Rectangle {
+// Single-choice radio list. The option labels are descriptive phrases ("Auto — synced to time
+// of day"), far too long for a segmented control, so each gets its own full-width row.
+component OptionList inherits VerticalLayout {
+    in property <string> label;
     in property <[Choice]> options;
     in property <int> selected: 0;
     callback chosen(int);
+    spacing: 6px;
 
-    height: 34px;
-    background: Theme.surface-sunken;
-    border-radius: Theme.r-sm;
-    border-width: 1px;
-    border-color: Theme.hairline;
-    width: layout.preferred-width + 8px;
+    if root.label != "" : Text {
+        text: root.label;
+        color: Theme.text-secondary;
+        font-size: 12px;
+        font-family: Theme.font-ui;
+    }
 
-    layout := HorizontalLayout {
-        x: 4px;
-        y: 4px;
-        height: parent.height - 8px;
-        spacing: 3px;
-        alignment: start;
-
+    VerticalLayout {
+        spacing: 2px;
         for option[index] in root.options : Rectangle {
-            width: max(70px, label.preferred-width + 22px);
-            height: parent.height;
-            border-radius: Theme.r-sm - 2px;
-            background: root.selected == index ? Accent.wash : (hit.has-hover ? Theme.surface-raised : transparent);
+            property <bool> on: root.selected == index;
+            height: 34px;
+            border-radius: Theme.r-sm;
+            background: self.on ? Accent.wash : (hit.has-hover ? Theme.surface-raised : transparent);
             border-width: 1px;
-            border-color: root.selected == index ? Accent.edge : transparent;
+            border-color: self.on ? Accent.edge : transparent;
 
-            label := Text {
-                text: option.label;
-                color: root.selected == index ? Theme.accent : Theme.text-secondary;
-                font-size: 11.5px;
-                font-family: Theme.font-ui;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            Rectangle {
                 x: 11px;
-                width: parent.width - 22px;
+                y: (parent.height - 16px) / 2;
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border-width: parent.on ? 5px : 1.5px;
+                border-color: parent.on ? Theme.accent : (hit.has-hover ? Theme.text-secondary : Theme.hairline-strong.brighter(0.4));
+                background: parent.on ? Theme.canvas : transparent;
+                animate border-width { duration: 120ms; easing: ease-out; }
+            }
+            Text {
+                x: 37px;
+                width: parent.width - 47px;
+                height: parent.height;
+                text: option.label;
+                color: parent.on ? Theme.text : (hit.has-hover ? Theme.text : Theme.text-secondary);
+                font-size: 12.5px;
+                font-weight: parent.on ? 600 : 400;
+                font-family: Theme.font-ui;
+                vertical-alignment: center;
+                overflow: elide;
             }
 
             hit := TouchArea {
@@ -190,36 +263,50 @@ component ActionButton inherits Rectangle {
     in property <string> icon: "";
     in property <bool> primary: false;
     in property <bool> danger: false;
+    in property <bool> active: false;
     callback clicked();
 
     height: 32px;
-    width: label-text.preferred-width + (root.icon == "" ? 26px : 48px);
+    width: content.preferred-width + 24px;
     border-radius: Theme.r-sm;
     background: root.primary
-        ? (hit.pressed ? Accent.edge : (hit.has-hover ? Theme.accent : Theme.accent))
-        : (root.danger
-            ? (hit.pressed ? Theme.danger : (hit.has-hover ? Theme.danger : Theme.surface-raised))
-            : (hit.has-hover ? Theme.surface-raised : Theme.surface-sunken));
+        ? (hit.pressed ? Theme.accent.darker(0.15) : (hit.has-hover ? Theme.accent.brighter(0.12) : Theme.accent))
+        : root.danger
+            ? (hit.pressed ? Theme.danger.darker(0.15) : (hit.has-hover ? Theme.danger : Theme.surface-sunken))
+            : root.active
+                ? Accent.wash
+                : (hit.pressed ? Theme.surface : (hit.has-hover ? Theme.surface-raised : Theme.surface-sunken));
     border-width: 1px;
-    border-color: root.primary ? Theme.accent : (root.danger ? Theme.hairline-strong : Theme.hairline-strong);
+    border-color: root.primary ? Theme.accent
+        : root.danger ? (hit.has-hover ? Theme.danger : Theme.danger-edge)
+        : root.active ? Accent.edge
+        : (hit.has-hover ? Theme.hairline-strong.brighter(0.25) : Theme.hairline-strong);
 
-    HorizontalLayout {
-        x: (parent.width - self.preferred-width) / 2;
-        y: 0;
-        height: parent.height;
+    animate background { duration: 110ms; easing: ease-out; }
+
+    property <color> ink: root.primary ? Theme.canvas
+        : root.danger ? (hit.has-hover ? Theme.canvas : Theme.danger)
+        : root.active ? Theme.accent
+        : Theme.text;
+
+    // Fills the button and centres its content. (Offsetting by x as well as centring
+    // shifted the label right by half the offset and clipped its last letters.)
+    content := HorizontalLayout {
         spacing: 7px;
         alignment: center;
 
-        Icon {
-            d: root.icon;
-            size: 14px;
-            tint: root.primary ? Theme.canvas : (root.danger ? Theme.danger : Theme.text-secondary);
-            visible: root.icon != "";
+        if root.icon != "" : VerticalLayout {
+            alignment: center;
+            Icon {
+                d: root.icon;
+                size: 14px;
+                tint: root.primary || root.danger || root.active ? root.ink : Theme.text-secondary;
+            }
         }
-        label-text := Text {
+        Text {
             text: root.label;
-            color: root.primary ? Theme.canvas : (root.danger ? Theme.danger : Theme.text);
-            font-size: 11.5px;
+            color: root.ink;
+            font-size: 12px;
             font-weight: 600;
             font-family: Theme.font-ui;
             vertical-alignment: center;
@@ -232,170 +319,185 @@ component ActionButton inherits Rectangle {
     }
 }
 
-component Stepper inherits Rectangle {
-    in property <string> label;
-    in property <float> value: 1.0;
-    in property <float> min: 0.5;
-    in property <float> max: 2.5;
-    in property <int> decimals: 2;
-    callback changed(float);
+// Single-line input. `text` is two-way so callers can bind a draft property to it.
+component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder: "";
+    callback edited(string);
+    callback accepted(string);
 
-    height: 42px;
+    height: 34px;
+    min-width: 120px;
+    horizontal-stretch: 1;
+    background: Theme.surface-sunken;
+    border-radius: Theme.r-sm;
+    border-width: 1px;
+    border-color: field.has-focus ? Theme.accent : (hover.has-hover ? Theme.hairline-strong.brighter(0.25) : Theme.hairline-strong);
+
+    hover := TouchArea {
+        mouse-cursor: MouseCursor.text;
+        clicked => { field.focus(); }
+    }
+
+    Text {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-size: 12.5px;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        overflow: elide;
+        visible: root.text == "";
+    }
+
+    field := TextInput {
+        x: 11px;
+        width: parent.width - 22px;
+        height: parent.height;
+        text <=> root.text;
+        color: Theme.text;
+        selection-background-color: Accent.edge;
+        selection-foreground-color: Theme.text;
+        font-size: 12.5px;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        single-line: true;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+// Horizontal drag meter: track, fill, and value read-out above it.
+component Slider inherits Rectangle {
+    in property <float> fraction: 0.5;
+    in property <color> fill: Theme.accent;
+    callback moved-to(float);
+
+    height: 18px;
+    min-width: 120px;
     background: transparent;
 
-    Text {
-        text: root.label;
-        color: Theme.text-secondary;
-        font-size: 11.5px;
-        font-family: Theme.font-ui;
-        y: 0;
-        height: 16px;
-        vertical-alignment: bottom;
-    }
-    Text {
-        text: round(root.value * 100) + "%";
-        x: parent.width - self.width;
-        y: 0;
-        height: 16px;
-        color: Theme.accent;
-        font-size: 11.5px;
-        font-weight: 700;
-        vertical-alignment: bottom;
-        horizontal-alignment: right;
-    }
-
     Rectangle {
-        y: 22px;
-        width: parent.width;
-        height: 20px;
+        y: (parent.height - 6px) / 2;
+        height: 6px;
+        border-radius: 3px;
         background: Theme.surface-sunken;
-        border-radius: 5px;
         border-width: 1px;
-        border-color: Theme.hairline;
+        border-color: Theme.hairline-strong;
 
         Rectangle {
-            x: 2px;
-            y: 2px;
-            height: parent.height - 4px;
-            width: Math.max(4px, (parent.width - 4px) * ((root.value - root.min) / (root.max - root.min)));
+            x: 0;
+            width: parent.width * clamp(root.fraction, 0.0, 1.0);
             border-radius: 3px;
-            background: Theme.accent;
-            animate width { duration: 90ms; }
+            background: root.fill;
+            animate width { duration: 90ms; easing: ease-out; }
         }
+    }
 
-        drag := TouchArea {
-            mouse-cursor: pointer;
-            moved => {
-                root.changed(Math.clamp(root.min, root.max,
-                    root.min + ((self.mouse-x / Math.max(1px, self.width)) * (root.max - root.min))));
+    // Thumb
+    Rectangle {
+        x: (parent.width - 14px) * clamp(root.fraction, 0.0, 1.0);
+        y: (parent.height - 14px) / 2;
+        width: 14px;
+        height: 14px;
+        border-radius: 7px;
+        background: Theme.text;
+        border-width: 3px;
+        border-color: drag.pressed || drag.has-hover ? root.fill : Theme.surface;
+        animate x { duration: 90ms; easing: ease-out; }
+    }
+
+    drag := TouchArea {
+        mouse-cursor: pointer;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root.moved-to(clamp(self.mouse-x / max(1px, self.width), 0.0, 1.0));
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.moved-to(clamp(self.mouse-x / max(1px, self.width), 0.0, 1.0));
             }
         }
     }
 }
 
-component FieldRow inherits Rectangle {
-    in property <string> label;
-    in property <string> value: "";
-    in property <bool> secret: false;
-    in property <string> placeholder: "";
-    callback edited(string);
-
-    height: 56px;
-    background: transparent;
-
-    Text {
-        text: root.label;
-        color: Theme.text-secondary;
-        font-size: 11px;
-        font-family: Theme.font-ui;
-        y: 0;
-        height: 16px;
-        vertical-alignment: bottom;
-    }
-
-    frame := Rectangle {
-        y: 20px;
-        width: parent.width;
-        height: 32px;
-        background: Theme.surface-sunken;
-        border-radius: Theme.r-sm;
-        border-width: 1px;
-        border-color: field.has-focus ? Accent.edge : Theme.hairline-strong;
-
-        field := TextInput {
-            x: 9px;
-            y: 0;
-            width: parent.width - 18px;
-            height: parent.height;
-            text: root.value;
-            color: Theme.text;
-            font-size: 12px;
-            font-family: Theme.font-ui;
-            vertical-alignment: center;
-            single-line: true;
-            edited => { root.edited(field.text); }
-        }
-
-        Text {
-            x: 10px;
-            y: 0;
-            height: parent.height;
-            text: root.placeholder;
-            color: Theme.text-muted;
-            font-size: 12px;
-            font-family: Theme.font-ui;
-            vertical-alignment: center;
-            visible: root.value == "";
-        }
-    }
-}
-
 // Emotion EXP meter, the studio's signature read-out.
-component EmotionMeter inherits Rectangle {
+component EmotionMeter inherits VerticalLayout {
     in property <EmotionRow> data;
-    height: 52px;
-    background: transparent;
+    spacing: 6px;
 
-    Text {
-        x: 0;
-        y: 0;
-        height: 18px;
-        text: data.title;
-        color: Theme.text;
-        font-size: 12px;
-        font-weight: 600;
-        font-family: Theme.font-ui;
-        vertical-alignment: bottom;
-    }
-    Text {
-        x: 0;
-        y: 0;
-        width: parent.width;
-        height: 18px;
-        text: data.tier + "  ·  " + data.level;
-        color: data.tint;
-        font-size: 10.5px;
-        font-family: Theme.font-ui;
-        horizontal-alignment: right;
-        vertical-alignment: bottom;
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: root.data.title;
+            color: Theme.text;
+            font-size: 12.5px;
+            font-weight: 600;
+            font-family: Theme.font-ui;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.data.tier + "  ·  " + root.data.level;
+            color: root.data.tint;
+            font-size: 11.5px;
+            font-family: Theme.font-ui;
+            horizontal-alignment: right;
+        }
     }
     Rectangle {
-        y: 22px;
-        width: parent.width;
         height: 6px;
         border-radius: 3px;
         background: Theme.surface-sunken;
         border-width: 1px;
-        border-color: data.tint;
+        border-color: Theme.hairline-strong;
         Rectangle {
             x: 0;
-            y: 0;
-            height: parent.height;
-            width: parent.width * clamp(0.0, 1.0, data.percent);
+            width: parent.width * clamp(root.data.percent, 0.0, 1.0);
             border-radius: 3px;
-            background: data.color;
-            animate width { duration: 220ms; easing: ease-out; }
+            background: root.data.color;
+            animate width { duration: 260ms; easing: cubic-bezier(0.16, 1, 0.3, 1); }
         }
+    }
+}
+
+component TraitControl inherits VerticalLayout {
+    in property <TraitRow> data;
+    callback changed(string, int);
+    spacing: 4px;
+
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: root.data.name;
+            color: Theme.text;
+            font-size: 12.5px;
+            font-weight: 600;
+            font-family: Theme.font-ui;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.data.percent + "%";
+            color: root.data.color;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: Theme.font-ui;
+            horizontal-alignment: right;
+        }
+    }
+    if root.data.desc != "" : Text {
+        text: root.data.desc;
+        color: Theme.text-muted;
+        font-size: 11.5px;
+        font-family: Theme.font-ui;
+        overflow: elide;
+    }
+    Slider {
+        fraction: root.data.percent / 100;
+        fill: root.data.color;
+        moved-to(f) => { root.changed(root.data.key, round(f * 100)); }
     }
 }
 
@@ -403,6 +505,7 @@ component NavItem inherits Rectangle {
     in property <string> label;
     in property <string> icon: "";
     in property <bool> selected: false;
+    in property <bool> danger: false;
     callback activated();
 
     height: 36px;
@@ -411,26 +514,29 @@ component NavItem inherits Rectangle {
     border-width: 1px;
     border-color: root.selected ? Accent.edge : transparent;
 
-    HorizontalLayout {
-        x: 10px;
+    Icon {
+        x: 11px;
+        y: (parent.height - self.height) / 2;
+        d: root.icon;
+        size: 16px;
+        tint: root.selected ? Theme.accent
+            : root.danger && hit.has-hover ? Theme.danger
+            : (hit.has-hover ? Theme.text : Theme.text-secondary);
+    }
+    Text {
+        x: 37px;
+        width: parent.width - 45px;
         height: parent.height;
-        width: parent.width - 20px;
-        spacing: 9px;
-        alignment: start;
-
-        Icon {
-            d: root.icon;
-            size: 15px;
-            tint: root.selected ? Theme.accent : Theme.text-secondary;
-        }
-        Text {
-            text: root.label;
-            color: root.selected ? Theme.text : Theme.text-secondary;
-            font-size: 12px;
-            font-family: Theme.font-ui;
-            vertical-alignment: center;
-            horizontal-alignment: left;
-        }
+        text: root.label;
+        color: root.selected ? Theme.text
+            : root.danger && hit.has-hover ? Theme.danger
+            : (hit.has-hover ? Theme.text : Theme.text-secondary);
+        font-size: 12.5px;
+        font-weight: root.selected ? 600 : 400;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        horizontal-alignment: left;
+        overflow: elide;
     }
 
     hit := TouchArea {
@@ -439,9 +545,54 @@ component NavItem inherits Rectangle {
     }
 }
 
+component Shortcut inherits HorizontalLayout {
+    in property <string> keys;
+    in property <string> action;
+    spacing: 16px;
+    min-height: 26px;
+
+    Rectangle {
+        width: 168px;
+        HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                width: key-label.preferred-width + 14px;
+                height: 22px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 5px;
+                background: Theme.surface-sunken;
+                border-width: 1px;
+                border-color: Theme.hairline-strong;
+                key-label := Text {
+                    text: root.keys;
+                    color: Theme.text;
+                    font-size: 11px;
+                    font-family: Theme.font-mono;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+    Text {
+        text: root.action;
+        color: Theme.text-secondary;
+        font-size: 12px;
+        font-family: Theme.font-ui;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
 export component ControlCenter inherits Window {
     title: "Aria Control Center";
     background: Theme.canvas;
+    preferred-width: 940px;
+    preferred-height: 720px;
+    min-width: 780px;
+    min-height: 540px;
+    default-font-family: Theme.font-ui;
 
     in-out property <color> accent-color: #38bdf8;
     in-out property <color> accent-wash: #12232c;
@@ -548,88 +699,109 @@ export component ControlCenter inherits Window {
     changed accent-wash => { Accent.wash = root.accent-wash; }
     changed accent-edge => { Accent.edge = root.accent-edge; }
 
+    function remember() {
+        if (root.fact-draft != "") {
+            root.add-fact(root.fact-draft);
+            root.fact-draft = "";
+        }
+    }
+
     VerticalLayout {
         padding: 0;
+        spacing: 0;
 
         // ---- Header: identity + live mood ----
         Rectangle {
-            height: 76px;
+            height: 68px;
             background: Theme.surface-sunken;
 
             Rectangle {
                 y: parent.height - 1px;
-                width: parent.width;
                 height: 1px;
                 background: Theme.hairline;
             }
 
-            VerticalLayout {
-                x: 24px;
-                y: 14px;
-                width: parent.width - 48px;
-                spacing: 3px;
-                alignment: start;
-
-                Text {
-                    text: "Aria";
-                    color: Theme.text;
-                    font-size: 17px;
-                    font-weight: 600;
-                    font-family: Theme.font-display;
-                    letter-spacing: -0.1px;
-                }
-                Text {
-                    text: root.mood-badge + "  ·  " + root.mood-reason + "  ·  " + root.affection-label;
-                    color: Theme.text-secondary;
-                    font-size: 11.5px;
-                    font-family: Theme.font-ui;
-                }
-            }
-
             HorizontalLayout {
-                x: parent.width - 300px;
-                y: 22px;
-                width: 276px;
-                height: 32px;
-                spacing: 8px;
-                alignment: end;
+                padding-left: 24px;
+                padding-right: 20px;
+                spacing: 16px;
 
-                ActionButton {
-                    label: "Reset pose";
-                    icon: Glyph.refresh;
-                    clicked => { root.reset-avatar(); }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "Aria";
+                        color: Theme.text;
+                        font-size: 18px;
+                        font-weight: 600;
+                        font-family: Theme.font-display;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        VerticalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: Theme.accent;
+                            }
+                        }
+                        Text {
+                            text: root.mood-name;
+                            color: Theme.accent;
+                            font-size: 12px;
+                            font-weight: 600;
+                            font-family: Theme.font-ui;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.mood-reason + "  ·  " + root.affection-label;
+                            color: Theme.text-secondary;
+                            font-size: 12px;
+                            font-family: Theme.font-ui;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
                 }
-                ActionButton {
-                    label: "Close";
-                    primary: true;
-                    clicked => { root.close(); }
+
+                VerticalLayout {
+                    alignment: center;
+                    ActionButton {
+                        label: "Reset pose";
+                        icon: Glyph.refresh;
+                        clicked => { root.reset-avatar(); }
+                    }
                 }
             }
         }
 
         HorizontalLayout {
             spacing: 0;
+            vertical-stretch: 1;
 
             // ---- Sidebar ----
             sidebar := Rectangle {
-                width: 196px;
+                width: 212px;
                 background: Theme.surface-sunken;
 
-                // Right-hand hairline: inset instead of anchored to parent.height.
                 Rectangle {
                     x: sidebar.width - 1px;
-                    y: 0;
                     width: 1px;
-                    height: sidebar.height;
                     background: Theme.hairline;
                 }
 
                 VerticalLayout {
                     padding-left: 12px;
-                    padding-right: 12px;
-                    padding-top: 14px;
-                    spacing: 3px;
-                    alignment: start;
+                    padding-right: 13px;
+                    padding-top: 16px;
+                    padding-bottom: 12px;
+                    spacing: 2px;
 
                     NavItem { label: "Studio & wardrobe"; icon: Glyph.spark; selected: root.tab == 0; activated => { root.set-tab(0); } }
                     NavItem { label: "Personality"; icon: Glyph.heart; selected: root.tab == 1; activated => { root.set-tab(1); } }
@@ -637,713 +809,562 @@ export component ControlCenter inherits Window {
                     NavItem { label: "Presence & gaming"; icon: Glyph.gamepad; selected: root.tab == 3; activated => { root.set-tab(3); } }
                     NavItem { label: "Engine & system"; icon: Glyph.sliders; selected: root.tab == 4; activated => { root.set-tab(4); } }
 
-                    // Pushes the utility items to the bottom without a hard-coded offset.
-                    VerticalLayout {
-                        vertical-stretch: 1;
-                        min-height: 0px;
+                    Rectangle { vertical-stretch: 1; min-height: 0px; }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.hairline;
                     }
+                    Rectangle { height: 6px; }
 
                     NavItem { label: "Open log"; icon: Glyph.doc; activated => { root.open-log(); } }
-                    NavItem { label: "Quit Aria"; icon: Glyph.power; activated => { root.quit-app(); } }
+                    NavItem { label: "Quit Aria"; icon: Glyph.power; danger: true; activated => { root.quit-app(); } }
                 }
             }
 
-
             // ---- Content ----
-            ScrollView {
-                // Layout-owned sizing: never bind a layout child's size back to the parent,
-                // that is a binding loop.
+            sv := ScrollView {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
-                content-width: self.width;
+                content-width: self.visible-width;
                 content-height: content.preferred-height;
 
-                content := VerticalLayout {
-                    padding-left: 22px;
-                    padding-right: 22px;
-                    padding-top: 18px;
-                    padding-bottom: 18px;
-                    spacing: 16px;
-                    alignment: start;
+                content := HorizontalLayout {
+                    width: sv.visible-width;
+                    padding-left: 28px;
+                    padding-right: 28px;
+                    padding-top: 24px;
+                    padding-bottom: 32px;
 
-                    // ============ TAB 0: Studio & wardrobe ============
-                    if root.tab == 0 : VerticalLayout {
-                        spacing: 16px;
-                        SectionTitle { title: "Wardrobe"; hint: ""; }
-                        Card {
-                            height: Math.ceil(root.props.length / 3) * 42px + 52px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 10px;
-                                Text {
-                                    text: "Accessories attach to the live avatar and persist across restarts.";
-                                    color: Theme.text-muted;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                }
-                                VerticalLayout {
-                                    for row[k] in Math.floor(root.props.length / 3) + 1 : HorizontalLayout {
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        max-width: 720px;
+                        spacing: 28px;
+                        alignment: start;
+
+                        // ============ TAB 0: Studio & wardrobe ============
+                        if root.tab == 0 : VerticalLayout {
+                            spacing: 28px;
+
+                            Section {
+                                title: "Wardrobe";
+                                note: "Accessories attach to the live avatar and persist across restarts.";
+                                Card {
+                                    gap: 8px;
+                                    for row[k] in Math.ceil(root.props.length / 3) : HorizontalLayout {
                                         spacing: 8px;
-                                        for cell[m] in 3 : Rectangle {
-                                            visible: k * 3 + m < root.props.length;
-                                            height: 30px;
-                                            width: (parent.width - 16px) / 3;
+                                        for cell[m] in 3 : cell-r := Rectangle {
+                                            property <int> idx: k * 3 + m;
+                                            property <bool> real: self.idx < root.props.length;
+                                            property <bool> on: self.real && root.props[self.idx].active;
+                                            horizontal-stretch: 1;
+                                            height: 36px;
                                             border-radius: Theme.r-sm;
-                                            background: root.props[k * 3 + m].active ? Accent.wash : (prop-hit.has-hover ? Theme.surface-raised : Theme.surface-sunken);
+                                            opacity: self.real ? 1 : 0;
+                                            background: self.on ? Accent.wash : (prop-hit.has-hover ? Theme.surface-raised : Theme.surface-sunken);
                                             border-width: 1px;
-                                            border-color: root.props[k * 3 + m].active ? Accent.edge : Theme.hairline;
+                                            border-color: self.on ? Accent.edge : (prop-hit.has-hover ? Theme.hairline-strong : Theme.hairline);
 
-                                            HorizontalLayout {
-                                                x: 9px;
-                                                height: parent.height;
-                                                spacing: 7px;
-                                                alignment: start;
-                                                Rectangle {
-                                                    width: 12px;
-                                                    height: 12px;
-                                                    border-radius: 3px;
-                                                    y: (parent.height - 12px) / 2;
-                                                    border-width: 1px;
-                                                    background: root.props[k * 3 + m].active ? Theme.accent : transparent;
-                                                    border-color: root.props[k * 3 + m].active ? Theme.accent : Theme.hairline-strong;
-                                                    Icon {
-                                                        d: Glyph.check;
-                                                        size: 10px;
-                                                        tint: Theme.canvas;
-                                                        visible: root.props[k * 3 + m].active;
-                                                    }
-                                                }
-                                                Text {
-                                                    text: root.props[k * 3 + m].label;
-                                                    color: root.props[k * 3 + m].active ? Theme.text : Theme.text-secondary;
-                                                    font-size: 11px;
-                                                    font-family: Theme.font-ui;
-                                                    vertical-alignment: center;
-                                                    overflow: elide;
+                                            Rectangle {
+                                                x: 11px;
+                                                y: (parent.height - 14px) / 2;
+                                                width: 14px;
+                                                height: 14px;
+                                                border-radius: 4px;
+                                                border-width: 1px;
+                                                background: parent.on ? Theme.accent : transparent;
+                                                border-color: parent.on ? Theme.accent : Theme.hairline-strong.brighter(0.3);
+                                                Icon {
+                                                    x: 1px;
+                                                    y: 1px;
+                                                    d: Glyph.check;
+                                                    size: 12px;
+                                                    weight: 2.4px;
+                                                    tint: Theme.canvas;
+                                                    visible: cell-r.on;
                                                 }
                                             }
-                                            prop-hit := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.toggle-prop(root.props[k * 3 + m].key); }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Camera & scale"; }
-                        Card {
-                            height: 176px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 12px;
-
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Framing";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
-                                    }
-                                    SegmentedChoice {
-                                        options: root.framings;
-                                        selected: root.framing-index;
-                                        chosen(idx) => { root.pick-framing(idx); }
-                                    }
-                                    ActionButton {
-                                        label: "Reset zoom";
-                                        icon: Glyph.refresh;
-                                        clicked => { root.reset-camera(); }
-                                    }
-                                }
-                                Stepper {
-                                    label: "Avatar size";
-                                    value: root.avatar-scale;
-                                    min: 0.5;
-                                    max: 2.5;
-                                    changed(v) => { root.set-avatar-scale(v); }
-                                }
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Lighting";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
-                                    }
-                                    SegmentedChoice {
-                                        options: root.lightings;
-                                        selected: root.lighting-index;
-                                        chosen(idx) => { root.pick-lighting(idx); }
-                                    }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Avatar source"; }
-                        Card {
-                            height: 66px;
-                            HorizontalLayout {
-                                x: 14px;
-                                height: parent.height;
-                                spacing: 8px;
-                                alignment: start;
-                                ActionButton { label: "Load VRM"; icon: Glyph.folder; clicked => { root.load-vrm(); } }
-                            }
-                        }
-                    }
-
-                    // ============ TAB 1: Personality ============
-                    if root.tab == 1 : VerticalLayout {
-                        spacing: 16px;
-                        SectionTitle { title: "Autonomous mood"; }
-                        Card {
-                            height: 96px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 8px;
-                                Text {
-                                    text: root.mood-name;
-                                    color: root.accent-color;
-                                    font-size: 20px;
-                                    font-weight: 600;
-                                    font-family: Theme.font-display;
-                                }
-                                Text {
-                                    text: "Aria picks her own personality from what you're doing, how you speak to her, and the hour. This is a read-out, not a setting.";
-                                    color: Theme.text-secondary;
-                                    font-size: 11.5px;
-                                    font-family: Theme.font-ui;
-                                    wrap: word-wrap;
-                                    height: 30px;
-                                }
-                            }
-                        }
-                        ToggleRow {
-                            label: "Voice follows mood";
-                            hint: "Swap the TTS voice when her personality shifts";
-                            checked: root.voice-follows-mood;
-                            toggled(v) => { root.toggle-voice-mood(v); }
-                        }
-
-                        SectionTitle { title: "Emotion EXP"; }
-                        Card {
-                            height: root.emotions.length * 52px + 92px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 4px;
-                                for e in root.emotions : EmotionMeter { data: e; }
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    ActionButton { label: "Headpat"; icon: Glyph.heart; clicked => { root.headpat(); } }
-                                    ActionButton { label: "Tease"; icon: Glyph.bolt; clicked => { root.tease(); } }
-                                    ActionButton { label: "Hype"; icon: Glyph.spark; clicked => { root.hype(); } }
-                                    ActionButton { label: "Vibe"; icon: Glyph.wave; clicked => { root.groove(); } }
-                                    ActionButton { label: "Reset"; icon: Glyph.refresh; clicked => { root.reset-emotions(); } }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Baseline traits"; }
-                        Card {
-                            height: root.traits.length * 62px + 24px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 4px;
-                                for t in root.traits : VerticalLayout {
-                                    height: 58px;
-                                    spacing: 0px;
-                                    HorizontalLayout {
-                                        height: 18px;
-                                        Text {
-                                            text: t.name;
-                                            color: Theme.text;
-                                            font-size: 11.5px;
-                                            font-weight: 600;
-                                            font-family: Theme.font-ui;
-                                            vertical-alignment: bottom;
-                                        }
-                                        Text {
-                                            text: t.percent + "%";
-                                            color: t.color;
-                                            font-size: 11px;
-                                            font-weight: 700;
-                                            font-family: Theme.font-ui;
-                                            horizontal-alignment: right;
-                                            vertical-alignment: bottom;
-                                            width: parent.width;
-                                        }
-                                    }
-                                    Text {
-                                        text: t.desc;
-                                        color: Theme.text-muted;
-                                        font-size: 10px;
-                                        font-family: Theme.font-ui;
-                                        height: 13px;
-                                        overflow: elide;
-                                    }
-                                    Rectangle {
-                                        height: 16px;
-                                        background: Theme.surface-sunken;
-                                        border-radius: 4px;
-                                        border-width: 1px;
-                                        border-color: Theme.hairline;
-                                        Rectangle {
-                                            x: 1px;
-                                            y: 1px;
-                                            height: parent.height - 2px;
-                                            width: max(3px, (parent.width - 2px) * (t.percent / 100));
-                                            border-radius: 3px;
-                                            background: t.color;
-                                        }
-                                        drag-t := TouchArea {
-                                            mouse-cursor: pointer;
-                                            moved => {
-                                                root.trait-changed(t.key, round(clamp(0, 100, (self.mouse-x / max(1px, self.width)) * 100)));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Memory vault"; }
-                        Card {
-                            height: max(120px, min(260px, root.facts.length * 30px + 108px));
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 8px;
-
-                                Text {
-                                    text: root.facts.length == 0
-                                        ? "Nothing remembered yet. Aria learns facts from conversation, or add one below."
-                                        : root.facts.length + " remembered facts";
-                                    color: Theme.text-muted;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
-                                }
-
-                                ScrollView {
-                                    height: parent.height - 92px;
-                                    content-height: fact-list.preferred-height;
-                                    content-width: self.width;
-                                    fact-list := VerticalLayout {
-                                        width: parent.width;
-                                        spacing: 2px;
-                                        for f in root.facts : Rectangle {
-                                            height: 28px;
-                                            background: row-f.has-hover ? Theme.surface-raised : transparent;
-                                            border-radius: Theme.r-sm;
                                             Text {
-                                                x: 8px;
-                                                width: parent.width - 16px;
+                                                x: 33px;
+                                                width: parent.width - 42px;
                                                 height: parent.height;
-                                                text: f.text;
-                                                color: Theme.text-secondary;
-                                                font-size: 11px;
+                                                text: parent.real ? root.props[parent.idx].label : "";
+                                                color: parent.on ? Theme.text : Theme.text-secondary;
+                                                font-size: 12px;
                                                 font-family: Theme.font-ui;
                                                 vertical-alignment: center;
                                                 overflow: elide;
                                             }
-                                            row-f := TouchArea { mouse-cursor: default; }
-                                        }
-                                    }
-                                }
-
-                                HorizontalLayout {
-                                    height: 32px;
-                                    spacing: 8px;
-                                    FieldRow {
-                                        width: parent.width - 240px;
-                                        label: "";
-                                        value: root.fact-draft;
-                                        placeholder: "Something to remember…";
-                                        edited(text) => { root.fact-draft = text; }
-                                    }
-                                    ActionButton {
-                                        label: "Remember";
-                                        primary: true;
-                                        clicked => {
-                                            if (root.fact-draft != "") {
-                                                root.add-fact(root.fact-draft);
-                                                root.fact-draft = "";
+                                            prop-hit := TouchArea {
+                                                enabled: parent.real;
+                                                mouse-cursor: pointer;
+                                                clicked => { root.toggle-prop(root.props[parent.idx].key); }
                                             }
                                         }
                                     }
-                                    ActionButton { label: "Briefing"; icon: Glyph.clock; clicked => { root.run-briefing(); } }
-                                }
-
-                                HorizontalLayout {
-                                    height: 30px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    ActionButton { label: "Add to-do"; icon: Glyph.plus; clicked => { root.add-todo(); } }
-                                    ActionButton { label: "Reset conversation"; icon: Glyph.refresh; clicked => { root.reset-conversation(); } }
-                                }
-                            }
-                        }
-                    }
-
-                    // ============ TAB 2: Voice & audio ============
-                    if root.tab == 2 : VerticalLayout {
-                        spacing: 16px;
-                        SectionTitle { title: "Voice"; }
-                        Card {
-                            height: 110px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 10px;
-                                width: parent.width - 28px;
-                                spacing: 6px;
-                                ToggleRow {
-                                    label: "Spoken replies";
-                                    hint: "Synthesize every answer with the selected voice";
-                                    checked: root.tts-on;
-                                    toggled(v) => { root.toggle-tts(v); }
-                                }
-                                HorizontalLayout {
-                                    height: 36px;
-                                    spacing: 8px;
-                                    alignment: start;
-                                    ActionButton {
-                                        label: root.voices.length > 0 ? root.voices[root.voice-index].label : "Voice";
-                                        icon: Glyph.speaker;
-                                        clicked => { root.pick-voice(Math.mod(root.voice-index + 1, Math.max(1, root.voices.length))); }
+                                    if root.props.length == 0 : Text {
+                                        text: "No accessories found for this model.";
+                                        color: Theme.text-muted;
+                                        font-size: 12px;
                                     }
-                                    ActionButton { label: "Audition"; icon: Glyph.play; clicked => { root.audition-voice(); } }
-                                    ActionButton { label: "Clone my clip"; icon: Glyph.folder; clicked => { root.clone-voice-file(); } }
+                                }
+                            }
+
+                            Section {
+                                title: "Camera & scale";
+                                Card {
+                                    gap: 18px;
+                                    OptionList {
+                                        label: "Framing";
+                                        options: root.framings;
+                                        selected: root.framing-index;
+                                        chosen(idx) => { root.pick-framing(idx); }
+                                    }
+                                    OptionList {
+                                        label: "Lighting";
+                                        options: root.lightings;
+                                        selected: root.lighting-index;
+                                        chosen(idx) => { root.pick-lighting(idx); }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.hairline; }
+                                    FormRow {
+                                        label: "Avatar size";
+                                        VerticalLayout {
+                                            alignment: center;
+                                            horizontal-stretch: 1;
+                                            Slider {
+                                                fraction: (root.avatar-scale - 0.5) / 2.0;
+                                                moved-to(f) => { root.set-avatar-scale(0.5 + f * 2.0); }
+                                            }
+                                        }
+                                        Text {
+                                            width: 44px;
+                                            text: round(root.avatar-scale * 100) + "%";
+                                            color: Theme.accent;
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            horizontal-alignment: right;
+                                            vertical-alignment: center;
+                                        }
+                                        ActionButton {
+                                            label: "Reset zoom";
+                                            icon: Glyph.refresh;
+                                            clicked => { root.reset-camera(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Avatar source";
+                                HorizontalLayout {
+                                    alignment: start;
+                                    ActionButton { label: "Load VRM…"; icon: Glyph.folder; clicked => { root.load-vrm(); } }
                                 }
                             }
                         }
 
-                        SectionTitle { title: "Microphone"; }
-                        Card {
-                            height: 148px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 10px;
-                                ToggleRow {
-                                    height: 30px;
-                                    label: "“Hey Aria” wake word";
-                                    hint: "Listen hands-free and answer when you say her name";
-                                    checked: root.wake-word;
-                                    toggled(v) => { root.toggle-wake-word(v); }
-                                }
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
+                        // ============ TAB 1: Personality ============
+                        if root.tab == 1 : VerticalLayout {
+                            spacing: 28px;
+
+                            Section {
+                                title: "Autonomous mood";
+                                Card {
+                                    gap: 6px;
                                     Text {
-                                        text: "Trigger";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
+                                        text: root.mood-name;
+                                        color: Theme.accent;
+                                        font-size: 22px;
+                                        font-weight: 600;
+                                        font-family: Theme.font-display;
                                     }
-                                    SegmentedChoice {
+                                    Text {
+                                        text: "Aria picks her own personality from what you're doing, how you speak to her, and the hour. This is a read-out, not a setting.";
+                                        color: Theme.text-secondary;
+                                        font-size: 12px;
+                                        font-family: Theme.font-ui;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Voice follows mood";
+                                        hint: "Swap the TTS voice when her personality shifts";
+                                        checked: root.voice-follows-mood;
+                                        toggled(v) => { root.toggle-voice-mood(v); }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Emotion EXP";
+                                Card {
+                                    gap: 16px;
+                                    for e in root.emotions : EmotionMeter { data: e; }
+                                    Rectangle { height: 1px; background: Theme.hairline; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ActionButton { label: "Headpat"; icon: Glyph.heart; clicked => { root.headpat(); } }
+                                        ActionButton { label: "Tease"; icon: Glyph.bolt; clicked => { root.tease(); } }
+                                        ActionButton { label: "Hype"; icon: Glyph.spark; clicked => { root.hype(); } }
+                                        ActionButton { label: "Vibe"; icon: Glyph.wave; clicked => { root.groove(); } }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        ActionButton { label: "Reset"; icon: Glyph.refresh; clicked => { root.reset-emotions(); } }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Baseline traits";
+                                note: "Drag to set where her mood settles when nothing is happening.";
+                                Card {
+                                    gap: 18px;
+                                    for t in root.traits : TraitControl {
+                                        data: t;
+                                        changed(key, value) => { root.trait-changed(key, value); }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Memory vault";
+                                note: root.facts.length == 0
+                                    ? "Nothing remembered yet. Aria learns facts from conversation, or add one below."
+                                    : root.facts.length + (root.facts.length == 1 ? " remembered fact" : " remembered facts");
+                                Card {
+                                    gap: 12px;
+
+                                    if root.facts.length > 0 : Rectangle {
+                                        height: min(root.facts.length * 32px + 8px, 232px);
+                                        background: Theme.surface-sunken;
+                                        border-radius: Theme.r-sm;
+                                        border-width: 1px;
+                                        border-color: Theme.hairline;
+
+                                        ScrollView {
+                                            content-width: self.width;
+                                            content-height: fact-list.preferred-height;
+                                            fact-list := VerticalLayout {
+                                                padding: 4px;
+                                                spacing: 0px;
+                                                for f in root.facts : Rectangle {
+                                                    height: 32px;
+                                                    background: row-f.has-hover ? Theme.surface-raised : transparent;
+                                                    border-radius: Theme.r-sm - 2px;
+                                                    Text {
+                                                        x: 10px;
+                                                        width: parent.width - (f.meta == "" ? 20px : 110px);
+                                                        height: parent.height;
+                                                        text: f.text;
+                                                        color: Theme.text;
+                                                        font-size: 12px;
+                                                        font-family: Theme.font-ui;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        x: parent.width - 100px;
+                                                        width: 90px;
+                                                        height: parent.height;
+                                                        text: f.meta;
+                                                        color: Theme.text-muted;
+                                                        font-size: 11px;
+                                                        font-family: Theme.font-ui;
+                                                        horizontal-alignment: right;
+                                                        vertical-alignment: center;
+                                                        overflow: elide;
+                                                    }
+                                                    row-f := TouchArea { mouse-cursor: default; }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        TextField {
+                                            text <=> root.fact-draft;
+                                            placeholder: "Something to remember…";
+                                            accepted => { root.remember(); }
+                                        }
+                                        ActionButton {
+                                            label: "Remember";
+                                            primary: true;
+                                            clicked => { root.remember(); }
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    ActionButton { label: "Briefing"; icon: Glyph.clock; clicked => { root.run-briefing(); } }
+                                    ActionButton { label: "Add to-do"; icon: Glyph.plus; clicked => { root.add-todo(); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    ActionButton { label: "Reset conversation"; icon: Glyph.refresh; danger: true; clicked => { root.reset-conversation(); } }
+                                }
+                            }
+                        }
+
+                        // ============ TAB 2: Voice & audio ============
+                        if root.tab == 2 : VerticalLayout {
+                            spacing: 28px;
+
+                            Section {
+                                title: "Voice";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Spoken replies";
+                                        hint: "Synthesize every answer with the selected voice";
+                                        checked: root.tts-on;
+                                        toggled(v) => { root.toggle-tts(v); }
+                                    }
+                                }
+                                Card {
+                                    gap: 12px;
+                                    FormRow {
+                                        label: "Voice";
+                                        ActionButton {
+                                            label: root.voices.length > 0 ? root.voices[root.voice-index].label : "Default";
+                                            icon: Glyph.speaker;
+                                            clicked => { root.pick-voice(Math.mod(root.voice-index + 1, Math.max(1, root.voices.length))); }
+                                        }
+                                        Text {
+                                            text: root.voices.length > 1 ? "Click to cycle · " + (root.voice-index + 1) + " of " + root.voices.length : "";
+                                            color: Theme.text-muted;
+                                            font-size: 11.5px;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                    FormRow {
+                                        label: "";
+                                        ActionButton { label: "Audition"; icon: Glyph.play; clicked => { root.audition-voice(); } }
+                                        ActionButton { label: "Clone from a clip…"; icon: Glyph.folder; clicked => { root.clone-voice-file(); } }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Microphone";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "“Hey Aria” wake word";
+                                        hint: "Listen hands-free and answer when you say her name";
+                                        checked: root.wake-word;
+                                        toggled(v) => { root.toggle-wake-word(v); }
+                                    }
+                                }
+                                Card {
+                                    gap: 18px;
+                                    OptionList {
+                                        label: "Trigger";
                                         options: root.mic-modes;
                                         selected: root.mic-index;
                                         chosen(idx) => { root.pick-mic-mode(idx); }
                                     }
-                                }
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Input";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
+                                    Rectangle { height: 1px; background: Theme.hairline; }
+                                    FormRow {
+                                        label: "Input";
+                                        ActionButton {
+                                            label: root.inputs.length > 0 ? root.inputs[root.input-index].name : "System default";
+                                            icon: Glyph.mic;
+                                            clicked => { root.pick-input(Math.mod(root.input-index + 1, Math.max(1, root.inputs.length))); }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
                                     }
-                                    ActionButton {
-                                        label: root.inputs.length > 0 ? root.inputs[root.input-index].name : "System default";
-                                        icon: Glyph.mic;
-                                        clicked => { root.pick-input(Math.mod(root.input-index + 1, Math.max(1, root.inputs.length))); }
+                                }
+                            }
+
+                            Section {
+                                title: "Output & music";
+                                Card {
+                                    gap: 12px;
+                                    FormRow {
+                                        label: "Speakers";
+                                        ActionButton {
+                                            label: root.outputs.length > 0 ? root.outputs[root.output-index].name : "System default";
+                                            icon: Glyph.speaker;
+                                            clicked => { root.pick-output(Math.mod(root.output-index + 1, Math.max(1, root.outputs.length))); }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Vibe to your music";
+                                        hint: "She dances when Spotify or YouTube plays";
+                                        checked: root.music-vibe;
+                                        toggled(v) => { root.toggle-music-vibe(v); }
                                     }
                                 }
                             }
                         }
 
-                        SectionTitle { title: "Output & music"; }
-                        Card {
-                            height: 160px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 10px;
-                                width: parent.width - 28px;
-                                spacing: 4px;
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Speakers";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
+                        // ============ TAB 3: Presence & gaming ============
+                        if root.tab == 3 : VerticalLayout {
+                            spacing: 28px;
+
+                            Section {
+                                title: "Proactive company";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Proactive reactions";
+                                        hint: "Occasional comments on your workflow and hardware";
+                                        checked: root.proactive;
+                                        toggled(v) => { root.toggle-proactive(v); }
                                     }
-                                    ActionButton {
-                                        label: root.outputs.length > 0 ? root.outputs[root.output-index].name : "System default";
-                                        icon: Glyph.speaker;
-                                        clicked => { root.pick-output(Math.mod(root.output-index + 1, Math.max(1, root.outputs.length))); }
+                                    ToggleRow {
+                                        divider: true;
+                                        label: "AFK & posture guardian";
+                                        hint: "Notices when you step away and reminds you to move";
+                                        checked: root.presence;
+                                        toggled(v) => { root.toggle-presence(v); }
+                                    }
+                                    ToggleRow {
+                                        divider: true;
+                                        label: "Clipboard bug watcher";
+                                        hint: "Diagnoses a traceback the moment you copy it";
+                                        checked: root.clipboard;
+                                        toggled(v) => { root.toggle-clipboard(v); }
                                     }
                                 }
-                                ToggleRow {
-                                    label: "Vibe to your music";
-                                    hint: "She dances when Spotify or YouTube plays";
-                                    checked: root.music-vibe;
-                                    toggled(v) => { root.toggle-music-vibe(v); }
-                                }
                             }
-                        }
-                    }
 
-                    // ============ TAB 3: Presence & gaming ============
-                    if root.tab == 3 : VerticalLayout {
-                        spacing: 16px;
-                        SectionTitle { title: "Proactive company"; }
-                        Card {
-                            height: 150px;
-                            VerticalLayout {
-                                x: 10px;
-                                y: 6px;
-                                width: parent.width - 20px;
-                                spacing: 0px;
-                                ToggleRow {
-                                    label: "Proactive reactions";
-                                    hint: "Occasional comments on your workflow and hardware";
-                                    checked: root.proactive;
-                                    toggled(v) => { root.toggle-proactive(v); }
-                                }
-                                ToggleRow {
-                                    label: "AFK & posture guardian";
-                                    hint: "Notices when you step away and reminds you to move";
-                                    checked: root.presence;
-                                    toggled(v) => { root.toggle-presence(v); }
-                                }
-                                ToggleRow {
-                                    label: "Clipboard bug watcher";
-                                    hint: "Diagnoses a traceback the moment you copy it";
-                                    checked: root.clipboard;
-                                    toggled(v) => { root.toggle-clipboard(v); }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Gaming"; }
-                        Card {
-                            height: 126px;
-                            VerticalLayout {
-                                x: 10px;
-                                y: 6px;
-                                width: parent.width - 20px;
-                                spacing: 0px;
-                                ToggleRow {
-                                    label: "Game copilot";
-                                    hint: "Live screen tips and callouts while you play";
-                                    checked: root.gaming-copilot;
-                                    toggled(v) => { root.toggle-gaming(v); }
-                                }
-                                ToggleRow {
-                                    label: "Smart dodge";
-                                    hint: "Shrinks to a corner when a game takes the screen";
-                                    checked: root.game-dodge;
-                                    toggled(v) => { root.toggle-dodge(v); }
-                                }
-                                ToggleRow {
-                                    label: "Magnetic edge snapping";
-                                    hint: "Snaps to a bezel and leans in when you drag her close";
-                                    checked: root.edge-snap;
-                                    toggled(v) => { root.toggle-edge-snap(v); }
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Discord"; }
-                        Card {
-                            height: 58px;
-                            VerticalLayout {
-                                x: 10px;
-                                y: 6px;
-                                width: parent.width - 20px;
-                                ToggleRow {
-                                    label: "Rich Presence";
-                                    hint: "Show her current mood and affection on your profile";
-                                    checked: root.discord;
-                                    toggled(v) => { root.toggle-discord(v); }
-                                }
-                            }
-                        }
-                    }
-
-                    // ============ TAB 4: Engine & system ============
-                    if root.tab == 4 : VerticalLayout {
-                        spacing: 16px;
-                        SectionTitle { title: "Model"; }
-                        Card {
-                            height: 128px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 12px;
-                                width: parent.width - 28px;
-                                spacing: 10px;
-                                HorizontalLayout {
-                                    height: 34px;
-                                    spacing: 10px;
-                                    alignment: start;
-                                    Text {
-                                        text: "Model";
-                                        width: 62px;
-                                        color: Theme.text-secondary;
-                                        font-size: 11.5px;
-                                        font-family: Theme.font-ui;
-                                        vertical-alignment: center;
+                            Section {
+                                title: "Gaming";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Game copilot";
+                                        hint: "Live screen tips and callouts while you play";
+                                        checked: root.gaming-copilot;
+                                        toggled(v) => { root.toggle-gaming(v); }
                                     }
-                                    SegmentedChoice {
+                                    ToggleRow {
+                                        divider: true;
+                                        label: "Smart dodge";
+                                        hint: "Shrinks to a corner when a game takes the screen";
+                                        checked: root.game-dodge;
+                                        toggled(v) => { root.toggle-dodge(v); }
+                                    }
+                                    ToggleRow {
+                                        divider: true;
+                                        label: "Magnetic edge snapping";
+                                        hint: "Snaps to a bezel and leans in when you drag her close";
+                                        checked: root.edge-snap;
+                                        toggled(v) => { root.toggle-edge-snap(v); }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Discord";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Rich Presence";
+                                        hint: "Show her current mood and affection on your profile";
+                                        checked: root.discord;
+                                        toggled(v) => { root.toggle-discord(v); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ============ TAB 4: Engine & system ============
+                        if root.tab == 4 : VerticalLayout {
+                            spacing: 28px;
+
+                            Section {
+                                title: "Language model";
+                                Card {
+                                    gap: 14px;
+                                    OptionList {
+                                        label: "Model";
                                         options: root.models;
                                         selected: root.model-index;
                                         chosen(idx) => { root.pick-model(idx); }
                                     }
-                                }
-                                FieldRow {
-                                    height: 40px;
-                                    label: "Base URL";
-                                    value: root.base-url;
-                                    placeholder: "https://api.sailresearch.com/v1";
-                                }
-                                Text {
-                                    text: "Changing the base URL persists on save below.";
-                                    color: Theme.text-muted;
-                                    font-size: 10px;
-                                    font-family: Theme.font-ui;
-                                    height: 12px;
-                                }
-                            }
-                        }
-
-                        SectionTitle { title: "Credentials"; }
-                        Card {
-                            height: 96px;
-                            VerticalLayout {
-                                x: 12px;
-                                y: 6px;
-                                width: parent.width - 24px;
-                                spacing: 6px;
-                                FieldRow {
-                                    label: "API key";
-                                    value: root.api-key-masked;
-                                    placeholder: "Paste your key…";
-                                    edited(text) => { root.save-engine(root.base-url, text); }
-                                }
-                                Text {
-                                    text: root.api-key-masked == ""
-                                        ? "No key set — Aria falls back to offline tools and local Ollama."
-                                        : "A key is set. Offline tools still work without it.";
-                                    color: Theme.text-muted;
-                                    font-size: 10.5px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
+                                    Rectangle { height: 1px; background: Theme.hairline; }
+                                    FormRow {
+                                        label: "Base URL";
+                                        url-field := TextField {
+                                            text: root.base-url;
+                                            placeholder: "https://api.sailresearch.com/v1";
+                                            accepted(t) => { root.save-engine(t, ""); }
+                                        }
+                                        ActionButton {
+                                            label: "Save";
+                                            clicked => { root.save-engine(url-field.text, ""); }
+                                        }
+                                    }
+                                    FormRow {
+                                        label: "API key";
+                                        TextField {
+                                            text: root.api-key-masked;
+                                            placeholder: "Paste your key…";
+                                            edited(t) => { root.save-engine(url-field.text, t); }
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 100px;
+                                        Text {
+                                            text: root.api-key-masked == ""
+                                                ? "No key set. Aria falls back to offline tools and local Ollama."
+                                                : "Key saved. Offline tools keep working without it.";
+                                            color: Theme.text-muted;
+                                            font-size: 11.5px;
+                                            font-family: Theme.font-ui;
+                                            wrap: word-wrap;
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        SectionTitle { title: "Window"; }
-                        Card {
-                            height: 132px;
-                            VerticalLayout {
-                                x: 10px;
-                                y: 6px;
-                                width: parent.width - 20px;
-                                spacing: 0px;
-                                ToggleRow {
-                                    label: "Chat box";
-                                    hint: "Show the command bar on hover or click";
-                                    checked: root.chatbox;
-                                    toggled(v) => { root.toggle-chatbox(v); }
-                                }
-                                ToggleRow {
-                                    label: "Capsule mode";
-                                    hint: "Collapse to a small pill instead of hiding";
-                                    checked: root.capsule;
-                                    toggled(v) => { root.toggle-capsule(v); }
-                                }
-                                ToggleRow {
-                                    label: "Auto-collapse";
-                                    hint: "Fold the bar away when you stop interacting";
-                                    checked: root.capsule-autohide;
-                                    toggled(v) => { root.toggle-capsule-autohide(v); }
+                            Section {
+                                title: "Desktop window";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Auto-hide chat bar";
+                                        hint: "Right-click her to show the bar; it hides after a few idle seconds";
+                                        checked: root.capsule-autohide;
+                                        toggled(v) => { root.toggle-capsule-autohide(v); }
+                                    }
                                 }
                             }
-                        }
 
-                        SectionTitle { title: "Shortcuts"; }
-                        Card {
-                            height: 96px;
-                            VerticalLayout {
-                                x: 14px;
-                                y: 10px;
-                                width: parent.width - 28px;
-                                spacing: 5px;
-                                Text {
-                                    text: "Alt+Space — summon and focus the command bar";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
-                                }
-                                Text {
-                                    text: "Ctrl+Shift+M — start or stop the microphone";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
-                                }
-                                Text {
-                                    text: "Ctrl+Shift+C — open this studio";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
-                                }
-                                Text {
-                                    text: "Middle-click her — quick-dial action ring";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                    font-family: Theme.font-ui;
-                                    height: 16px;
+                            Section {
+                                title: "Shortcuts";
+                                Card {
+                                    gap: 8px;
+                                    Shortcut { keys: "Alt+Space"; action: "Summon and focus the command bar"; }
+                                    Shortcut { keys: "Ctrl+Shift+M"; action: "Start or stop the microphone"; }
+                                    Shortcut { keys: "Ctrl+Shift+C"; action: "Open this Control Center"; }
+                                    Shortcut { keys: "Right-click"; action: "Show the chat bar (its ⋯ button opens the menu)"; }
+                                    Shortcut { keys: "Middle-click"; action: "Quick-dial action ring"; }
                                 }
                             }
                         }
@@ -1354,35 +1375,34 @@ export component ControlCenter inherits Window {
 
         // ---- Status strip ----
         Rectangle {
-            height: 34px;
+            height: 40px;
             background: Theme.surface-sunken;
             Rectangle {
                 y: 0;
-                width: parent.width;
                 height: 1px;
                 background: Theme.hairline;
             }
-            Text {
-                x: 24px;
-                y: 0;
-                height: parent.height;
-                text: root.status-text;
-                color: Theme.text-muted;
-                font-size: 11px;
-                font-family: Theme.font-ui;
-                vertical-alignment: center;
-            }
             HorizontalLayout {
-                x: parent.width - 260px;
-                y: 5px;
-                width: 236px;
-                height: 24px;
-                spacing: 8px;
-                alignment: end;
-                ActionButton {
-                    label: "Subtitles";
-                    icon: Glyph.bubble;
-                    clicked => { root.toggle-subtitles(!root.subtitles); }
+                padding-left: 24px;
+                padding-right: 12px;
+                spacing: 12px;
+                Text {
+                    text: root.status-text;
+                    color: Theme.text-secondary;
+                    font-size: 12px;
+                    font-family: Theme.font-ui;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    ActionButton {
+                        label: root.subtitles ? "Subtitles on" : "Subtitles off";
+                        icon: Glyph.bubble;
+                        active: root.subtitles;
+                        clicked => { root.toggle-subtitles(!root.subtitles); }
+                    }
                 }
             }
         }

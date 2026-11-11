@@ -32,7 +32,7 @@ component DialButton inherits Rectangle {
         height: 14px;
         text: root.label;
         color: hit.has-hover ? Theme.accent : Theme.text-muted;
-        font-size: 8.5px;
+        font-size: 9px;
         font-weight: 600;
         font-family: Theme.font-ui;
         horizontal-alignment: center;
@@ -48,6 +48,8 @@ component DialButton inherits Rectangle {
 export component QuickDial inherits Window {
     title: "Quick dial";
     background: transparent;
+    no-frame: true;
+    always-on-top: true;
     width: 260px;
     height: 260px;
 
@@ -71,6 +73,16 @@ export component QuickDial inherits Window {
     changed accent-color => { Theme.accent = root.accent-color; }
     changed accent-wash => { Accent.wash = root.accent-wash; }
     changed accent-edge => { Accent.edge = root.accent-edge; }
+
+    // Click outside the ring dismisses. Declared first so it sits beneath every button;
+    // declared last it covered them and every click dismissed.
+    TouchArea {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        clicked => { root.dismissed(); }
+    }
 
     // Ring backdrop: a thin guide circle, no filled disc.
     Path {
@@ -152,14 +164,5 @@ export component QuickDial inherits Window {
             mouse-cursor: pointer;
             clicked => { root.dismissed(); }
         }
-    }
-
-    // Click outside the ring dismisses.
-    TouchArea {
-        x: 0;
-        y: 0;
-        width: root.width;
-        height: root.height;
-        clicked => { root.dismissed(); }
     }
 }

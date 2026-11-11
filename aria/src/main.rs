@@ -77,8 +77,8 @@ fn setup_native_window(window_title: &str) {
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongW, GetWindowTextW, GetWindowThreadProcessId, SetWindowLongW,
-        SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME,
+        SetWindowPos, GWL_STYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME,
     };
 
     struct Search {
@@ -132,14 +132,16 @@ fn setup_native_window(window_title: &str) {
         // Note: WS_EX_LAYERED is deliberately NOT set. WebView2 composites its own transparent
         // child surface, and a layered parent suppresses that path entirely.
 
+        // Topmost here too: winit's always-on-top request in `setup_window` runs before the
+        // window exists and never takes effect.
         let _ = SetWindowPos(
             hwnd,
-            None,
+            Some(HWND_TOPMOST),
             0,
             0,
             0,
             0,
-            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         log::info!("native window styled: frameless + transparent");
     }

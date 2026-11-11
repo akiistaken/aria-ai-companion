@@ -71,11 +71,12 @@ pub struct App {
     pub accent: (String, String, String),
     pub music_vibing: bool,
     pub last_discord: Instant,
-    pub bar_pinned_open: bool,
+    /// Last time the chat bar was shown or used; it auto-hides after `BAR_IDLE_HIDE` without use.
+    pub bar_activity: Instant,
     /// True while the cursor is over the avatar model (drives click-through).
     pub over_model: bool,
-    /// Window size and stage hole the mascot's hit region was last cut for.
-    pub region_key: Option<(i32, i32, (i32, i32, i32, i32))>,
+    /// Window size, stage hole and bar visibility the mascot's hit region was last cut for.
+    pub region_key: Option<(i32, i32, (i32, i32, i32, i32), bool)>,
     /// Bubble slot height the window was last laid out for (logical px).
     pub bubble_slot: f32,
     /// Owned so they are dropped (and stopped) with the app instead of leaked.
@@ -238,7 +239,7 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         accent: (String::new(), String::new(), String::new()),
         music_vibing: false,
         last_discord: Instant::now(),
-        bar_pinned_open: false,
+        bar_activity: Instant::now(),
         over_model: false,
         region_key: None,
         bubble_slot: 0.0,

@@ -223,8 +223,14 @@ fn spawn_connection(
                             Ok(command) => {
                                 // Moves skip the frame loop: the window thread applies them
                                 // within ~15 ms, so the avatar keeps pace with its chrome.
-                                if let Command::SetWindowRect { x, y, .. } = &command {
-                                    crate::layered::place(*x, *y);
+                                match &command {
+                                    Command::SetWindowRect { x, y, .. } => {
+                                        crate::layered::place(*x, *y)
+                                    }
+                                    Command::SetOwner { hwnd } => {
+                                        crate::layered::set_owner(*hwnd as isize)
+                                    }
+                                    _ => {}
                                 }
                                 if in_tx.send(command).is_err() {
                                     break;
@@ -324,6 +330,8 @@ pub fn pump_link(
             }
             // The app applies click-through to the window itself; nothing to do here.
             Command::SetClickThrough { .. } => {}
+            // Applied by the window thread as soon as the socket thread receives it.
+            Command::SetOwner { .. } => {}
             Command::Shutdown => {
                 commands.write_message(AppExit::Success);
             }

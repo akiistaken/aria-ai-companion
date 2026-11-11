@@ -22,6 +22,8 @@ export global Theme {
 
     // Semantic
     out property <color> danger: #f2555a;
+    out property <color> danger-wash: #2a1416;
+    out property <color> danger-edge: #6b2a2e;
     out property <color> success: #3ddc97;
     out property <color> warning: #f0b143;
 
@@ -75,6 +77,10 @@ export global Glyph {
     out property <string> check: "M4.5 12.5 L9.5 17.5 L19.5 6.5";
     out property <string> chevron: "M6.5 9.5 L12 15 L17.5 9.5";
     out property <string> plus: "M12 5 v14 M5 12 h14";
+    // Three small rings; drawn at a heavy weight they read as solid dots. (Zero-length segments
+    // with round caps render as nothing in Slint.)
+    out property <string> more: "M5 12 a1 1 0 1 0 2 0 a1 1 0 1 0 -2 0 Z M11 12 a1 1 0 1 0 2 0 a1 1 0 1 0 -2 0 Z M17 12 a1 1 0 1 0 2 0 a1 1 0 1 0 -2 0 Z";
+    out property <string> send:"M5 12 h13.5 M13 6.5 L18.5 12 L13 17.5";
     out property <string> play: "M8 5.5 L18.5 12 L8 18.5 Z";
     out property <string> pause: "M9 5.5 V18.5 M15 5.5 V18.5";
     out property <string> next: "M7 5.5 L15 12 L7 18.5 Z M18 5.5 V18.5";
