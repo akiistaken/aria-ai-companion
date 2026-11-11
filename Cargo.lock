@@ -291,6 +291,7 @@ name = "aria"
 version = "6.0.0"
 dependencies = [
  "arboard",
+ "aria-protocol",
  "cpal 0.18.2",
  "global-hotkey",
  "image",
@@ -318,6 +319,7 @@ dependencies = [
 name = "aria-avatar"
 version = "6.0.0"
 dependencies = [
+ "aria-protocol",
  "bevy",
  "bevy_vrm1",
  "log",
@@ -331,6 +333,7 @@ name = "aria-protocol"
 version = "6.0.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

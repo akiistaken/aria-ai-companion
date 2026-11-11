@@ -1,4 +1,4 @@
-//! Avatar behaviour: model loading, camera framing, expressions, blink, lip-sync, idle posing.
+﻿//! Avatar behaviour: model loading, camera framing, expressions, blink, lip-sync, idle posing.
 //!
 //! The numeric tuning values (framing distances, blink timing, breathing amplitudes) are ported
 //! from the WebView reference at `docs/reference/vtuber_stage.html` and must stay in sync with it.
@@ -14,6 +14,8 @@ use bevy_vrm1::prelude::*;
 /// Everything the main app can influence.
 #[derive(Resource)]
 pub struct AvatarState {
+    /// Path waiting to be loaded from `LoadModel`.
+    pub pending_model: Option<String>,
     pub emotion: String,
     pub facing_right: bool,
     pub moving: bool,
@@ -22,7 +24,7 @@ pub struct AvatarState {
     pub look_y: f32,
     pub mouth_aa: f32,
     pub mouth_oh: f32,
-    pub peeking: String,
+    pub peeking: aria_protocol::PeekSide,
     pub music_active: bool,
     pub music_energy: f32,
     pub inertia_x: f32,
@@ -64,7 +66,7 @@ impl Default for AvatarState {
             look_y: 0.0,
             mouth_aa: 0.0,
             mouth_oh: 0.0,
-            peeking: "none".into(),
+            peeking: aria_protocol::PeekSide::None,
             music_active: false,
             music_energy: 0.0,
             inertia_x: 0.0,
@@ -89,6 +91,7 @@ impl Default for AvatarState {
             squashed: 0.0,
             loaded_any: false,
             initial_model: String::new(),
+            pending_model: None,
         }
     }
 }
@@ -104,10 +107,6 @@ fn load_model(path: String, asset_server: &AssetServer, commands: &mut Commands)
     };
     commands.spawn((VrmHandle(handle), LookAt::Cursor));
 }
-
-/// Model path waiting to be spawned (from `LoadModel`).
-#[derive(Resource, Default)]
-pub struct PendingModel(pub Option<String>);
 
 #[derive(Component)]
 pub struct AvatarCamera;
@@ -166,7 +165,6 @@ fn rand_unit() -> f32 {
 pub fn animate(
     time: Res<Time>,
     mut state: ResMut<AvatarState>,
-    mut pending: ResMut<PendingModel>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut link: ResMut<crate::link::AvatarLink>,
@@ -177,9 +175,10 @@ pub fn animate(
     let dt = time.delta_secs().min(0.1);
 
     // ---- Model loading ----------------------------------------------------------------
-    if let Some(path) = pending.0.take() {
+    let requested = state.pending_model.take();
+    if let Some(path) = requested {
         load_model(path, &asset_server, &mut commands);
-    } else if state.root.is_none() && !state.loaded_any && !pending.0.is_some() {
+    } else if !state.loaded_any {
         // First frame: load whatever the command line asked for, else the bundled model.
         state.loaded_any = true;
         let initial = if state.initial_model.is_empty() {

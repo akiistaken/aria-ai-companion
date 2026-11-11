@@ -76,7 +76,7 @@ fn mask_key(key: &str) -> String {
             .into_iter()
             .rev()
             .collect();
-        format!("{start}…{end}")
+        format!("{start}Ã¢â‚¬Â¦{end}")
     } else {
         key.to_string()
     }
@@ -118,7 +118,7 @@ pub fn sync_studio(app: &AppHandle) {
                 icon: SharedString::from(e.icon),
                 title: SharedString::from(e.title),
                 tier: SharedString::from(e.tier),
-                level: SharedString::from(format!("Lv {} · {}/100", e.level, e.progress)),
+                level: SharedString::from(format!("Lv {} Ã‚Â· {}/100", e.level, e.progress)),
                 percent: (e.progress as f32 / 100.0).clamp(0.0, 1.0),
                 color,
                 tint: lighten(color, 0.5),
@@ -279,7 +279,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_clone_voice_file, || {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Audio", &["mp3", "wav", "flac", "ogg"])
-            .set_title("Pick a 5–20 s clip of the voice to clone")
+            .set_title("Pick a 5Ã¢â‚¬â€œ20 s clip of the voice to clone")
             .pick_file()
         {
             config::update(|s| {
@@ -288,7 +288,7 @@ pub fn wire_studio(studio: &ControlCenter) {
             with_app(|app| {
                 say(
                     app,
-                    &config::flav("Got your reference clip — I'll keep it for voice work."),
+                    &config::flav("Got your reference clip Ã¢â‚¬â€ I'll keep it for voice work."),
                     "happy",
                     vec![format!("reference clip: {}", path.display())],
                     false,
@@ -441,7 +441,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_save_engine, |url, key| {
         let url = url.to_string();
         let key = key.to_string();
-        let is_masked = key.contains('…');
+        let is_masked = key.contains('\u{2026}');
         config::update(|s| {
             if !url.trim().is_empty() {
                 s.base_url = url.trim().to_string();
@@ -466,7 +466,7 @@ pub fn wire_studio(studio: &ControlCenter) {
         if let Some((key, _)) = config::BODY_FRAMINGS.get(idx.max(0) as usize) {
             config::update(|s| s.body_framing = (*key).to_string());
             with_app(|app| {
-                app.borrow().stage.borrow_mut().apply_settings();
+                crate::app::apply_avatar_settings(app);
                 if let Some(s) = app.borrow().studio.as_ref() {
                     s.set_framing_index(idx);
                 }
@@ -478,7 +478,7 @@ pub fn wire_studio(studio: &ControlCenter) {
         if let Some((key, _)) = config::STAGE_LIGHTING.get(idx.max(0) as usize) {
             config::update(|s| s.stage_lighting = (*key).to_string());
             with_app(|app| {
-                app.borrow().stage.borrow_mut().apply_settings();
+                crate::app::apply_avatar_settings(app);
                 if let Some(s) = app.borrow().studio.as_ref() {
                     s.set_lighting_index(idx);
                 }
@@ -496,7 +496,7 @@ pub fn wire_studio(studio: &ControlCenter) {
             s.camera_y_offset = 0.0;
         });
         with_app(|app| {
-            app.borrow().stage.borrow_mut().apply_settings();
+            crate::app::apply_avatar_settings(app);
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_status_text("Camera zoom and pan reset.".into());
             }
@@ -559,7 +559,7 @@ pub fn wire_studio(studio: &ControlCenter) {
                 .insert(key.clone(), serde_json::json!(active));
         });
         with_app(|app| {
-            app.borrow().stage.borrow_mut().apply_settings();
+            crate::app::apply_avatar_settings(app);
             sync_studio(app);
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_status_text(
@@ -649,7 +649,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_add_todo, || {
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
-                s.set_status_text("Add tasks from the chat bar — say “todo add …”.".into());
+                s.set_status_text("Add tasks from the chat bar Ã¢â‚¬â€ say Ã¢â‚¬Å“todo add Ã¢â‚¬Â¦Ã¢â‚¬Â.".into());
             }
         });
     });
@@ -687,18 +687,23 @@ pub fn wire_studio(studio: &ControlCenter) {
     let _ = (apply_scale, submit_prompt, hex_to_color);
 }
 
-fn switch_avatar(app: &AppHandle, mode: &str) {
-    let base = crate::assets::start();
-    let url = crate::stage::resolve_model_url(base);
-    app.borrow().stage.borrow_mut().switch_mode(mode, &url);
+fn switch_avatar(app: &AppHandle, _mode: &str) {
+    // VRM is the only avatar format now, so "switching" means reloading the configured model.
+    let model = crate::app::resolve_avatar_model(&config::get());
+    app.borrow().stage.load_model(&model);
+    app.borrow().stage.set_camera_framing(
+        &config::get().body_framing,
+        config::get().camera_zoom,
+        config::get().camera_y_offset,
+    );
     say(
         app,
-        &config::flav(&format!("Loaded the {mode} avatar. How does it look?")),
+        &config::flav("Reloaded my avatar. How does it look?"),
         "happy",
-        vec![format!("avatar mode: {mode}")],
+        vec!["avatar model reloaded".into()],
         false,
     );
     if let Some(s) = app.borrow().studio.as_ref() {
-        s.set_status_text(format!("Avatar switched to {mode}.").into());
+        s.set_status_text("Avatar model reloaded.".into());
     }
 }

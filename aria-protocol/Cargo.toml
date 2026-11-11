@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "aria-protocol"
 version = "6.0.0"
 edition = "2021"
@@ -6,3 +6,4 @@ description = "Shared message types for the Aria app <-> avatar socket"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"

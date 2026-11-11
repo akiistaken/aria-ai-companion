@@ -81,7 +81,6 @@ fn main() {
         initial_model: args.model.clone(),
         ..default()
     })
-    .init_resource::<behaviors::PendingModel>()
     .init_resource::<present::Presenter>()
     .init_resource::<present::LatestFrame>()
     .insert_resource(AvatarLink::new(args))
@@ -93,11 +92,12 @@ fn main() {
     .add_systems(
         Update,
         (
+            // Handshake first, so the app learns the window handle as early as possible.
+            link::announce_ready,
             link::pump_link,
             behaviors::animate,
             present::present_latest,
             present::request_capture,
-            attach_render_target,
         )
             .chain(),
     )
@@ -140,29 +140,6 @@ fn run_loop(mut app: App) -> AppExit {
 /// Turns the winit-created window into the layered presenter and starts offscreen rendering.
 ///
 /// Runs on the first frame, by which point winit has created the native window.
-/// Attaches the offscreen render target to the avatar camera.
-///
-/// This runs after the camera is spawned (Startup ordering is not guaranteed between the two), and
-/// keeps watching for a camera that appears later, e.g. after a model reload.
-fn attach_render_target(
-    mut commands: Commands,
-    target: Option<Res<present::OffscreenTarget>>,
-    cameras: Query<Entity, (With<behaviors::AvatarCamera>, Without<bevy::camera::RenderTarget>)>,
-) {
-    let Some(target) = target else { return };
-    for camera in cameras.iter() {
-        log::info!("attaching offscreen render target to the avatar camera");
-        commands
-            .entity(camera)
-            .insert(bevy::camera::RenderTarget::Image(
-                bevy::camera::ImageRenderTarget {
-                    handle: target.0.clone(),
-                    scale_factor: 1.0,
-                },
-            ));
-    }
-}
-
 fn setup_layered(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,

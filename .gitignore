@@ -15,3 +15,10 @@ settings.json
 # Scratch files
 /build-*.log
 /aria/aria_tree.txt
+
+# Runtime scratch
+/aria-err*.txt
+/aria-out*.txt
+/av*.txt
+/none.txt
+/dx12-stderr.txt

@@ -1,4 +1,4 @@
-﻿//! Win32 helpers: enumerate windows, map them to processes, force foreground, idle time,
+//! Win32 helpers: enumerate windows, map them to processes, force foreground, idle time,
 //! screen capture and working-set trimming.
 
 use serde::Serialize;
@@ -533,6 +533,84 @@ pub fn trim_working_set() -> bool {
 #[allow(dead_code)]
 pub fn handle_is_null(h: HANDLE) -> bool {
     h.0.is_null()
+}
+
+/// Positions and sizes a window owned by another process (the avatar renderer).
+///
+/// `SWP_NOACTIVATE` keeps the user's focus where it is, and `SWP_NOZORDER` leaves the Z-order
+/// alone so a walking avatar cannot jump in front of a fullscreen game.
+pub fn move_and_size_window(hwnd: isize, x: i32, y: i32, width: i32, height: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER,
+    };
+    if hwnd == 0 || width <= 0 || height <= 0 {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            HWND(hwnd as *mut _),
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        );
+    }
+}
+
+/// Puts a child process in a job object that kills it when this process dies.
+///
+/// The handle is deliberately leaked: the job must stay open for the lifetime of the app, and
+/// Windows closes it (killing the child) when the process exits for any reason.
+pub fn put_in_kill_on_close_job(child: &mut std::process::Child) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    unsafe {
+        let Ok(job) = CreateJobObjectW(None, None) else {
+            log::warn!("could not create the avatar job object");
+            return;
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_err()
+        {
+            log::warn!("could not set KILL_ON_JOB_CLOSE on the avatar job");
+            let _ = CloseHandle(job);
+            return;
+        }
+
+        let Ok(process) = OpenProcess(
+            PROCESS_SET_QUOTA | PROCESS_TERMINATE,
+            false,
+            child.id(),
+        ) else {
+            log::warn!("could not open the avatar process for job assignment");
+            let _ = CloseHandle(job);
+            return;
+        };
+        if AssignProcessToJobObject(job, process).is_err() {
+            log::warn!("could not assign the avatar to its job object");
+        }
+        let _ = CloseHandle(process);
+        // `job` is intentionally not closed; see the doc comment.
+        std::mem::forget(job);
+        log::info!("avatar renderer assigned to a kill-on-close job object");
+    }
 }
 
 #[cfg(test)]
