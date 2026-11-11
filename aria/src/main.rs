@@ -1,7 +1,8 @@
 //! Aria — autonomous desktop companion.
 //!
-//! Rust + Slint port of the original Python assistant. Slint draws every surface; the avatar
-//! keeps its WebGL renderer inside an embedded WebView2 child window.
+//! Rust + Slint port of the original Python assistant. Slint draws every surface except the
+//! avatar, which is the separate `aria-avatar` process (Bevy + VRM) driven over a local socket
+//! by `avatar_link`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 

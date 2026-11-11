@@ -5,6 +5,9 @@
 //! with per-pixel alpha. The main app drives it over a local socket and owns the window's position
 //! and size; nothing here handles desktop geometry.
 
+// Release builds must not open a console window of their own next to the avatar.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod behaviors;
 mod hearts;
 mod input;
@@ -78,6 +81,11 @@ fn main() {
                 primary_window: None,
                 exit_condition: bevy::window::ExitCondition::DontExit,
                 ..default()
+            })
+            // One small model at 30 FPS does not need a worker per core in every pool; idle
+            // workers still cost wake-ups. Three threads keep render extraction parallel.
+            .set(TaskPoolPlugin {
+                task_pool_options: TaskPoolOptions::with_num_threads(3),
             })
             // Rendering is driven by `run_loop`, not by a window event loop.
             .disable::<bevy::winit::WinitPlugin>(),

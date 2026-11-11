@@ -23,6 +23,8 @@ pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
 pub struct Persona {
     pub key: &'static str,
     pub name: &'static str,
+    /// Long descriptive label; part of the persona catalogue, not shown by the current UI.
+    #[allow(dead_code)]
     pub label: &'static str,
     pub short_badge: &'static str,
     pub accent: &'static str,

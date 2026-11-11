@@ -223,7 +223,10 @@ fn mutate<R>(f: impl FnOnce(&mut Memory) -> R) -> R {
     out
 }
 
+/// One emotion meter. `name`, `desc` and `gradient` are catalogue data the current Control Center
+/// does not display (it shows icon, title and colour), kept so the meters stay self-describing.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EmotionStat {
     pub key: &'static str,
     pub name: &'static str,

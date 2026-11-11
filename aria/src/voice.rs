@@ -551,7 +551,7 @@ fn recording_handle() -> &'static Mutex<Option<RecordingHandle>> {
 const SAMPLE_RATE: u32 = 16_000;
 
 fn input_device() -> Option<cpal::Device> {
-    use cpal::traits::{DeviceTrait, HostTrait};
+    use cpal::traits::HostTrait;
     let host = cpal::default_host();
     let wanted = crate::config::get().input_audio_device;
     if !wanted.trim().is_empty() {

@@ -20,23 +20,6 @@ use bevy::prelude::*;
 use crate::behaviors::AvatarState;
 use crate::rig::Rig;
 
-/// Names in the order the app's wardrobe uses.
-pub const PROP_NAMES: [&str; 13] = [
-    "cat_ears",
-    "headset",
-    "glasses",
-    "halo",
-    "angel_wings",
-    "witch_hat",
-    "sunglasses",
-    "devil_horns",
-    "cyber_sword",
-    "fox_tail",
-    "coffee_mug",
-    "game_controller",
-    "smartphone",
-];
-
 /// The root entity of one prop; its visibility follows `AvatarState::props`.
 #[derive(Component)]
 pub struct Prop(pub &'static str);

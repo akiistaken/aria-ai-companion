@@ -152,10 +152,6 @@ impl Rig {
         })
     }
 
-    pub fn bone(&self, name: &str) -> Option<&RigBone> {
-        self.bones.get(name)
-    }
-
     pub fn len(&self) -> usize {
         self.bones.len()
     }

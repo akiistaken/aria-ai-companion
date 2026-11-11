@@ -640,8 +640,7 @@ pub fn put_in_kill_on_close_job(child: &mut std::process::Child) {
             log::warn!("could not assign the avatar to its job object");
         }
         let _ = CloseHandle(process);
-        // `job` is intentionally not closed; see the doc comment.
-        std::mem::forget(job);
+        // `job` is intentionally never closed (handles have no Drop): see the doc comment.
         log::info!("avatar renderer assigned to a kill-on-close job object");
     }
 }

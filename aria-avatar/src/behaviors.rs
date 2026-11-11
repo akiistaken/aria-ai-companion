@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 
-use bevy::ecs::world::EntityRef;
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 

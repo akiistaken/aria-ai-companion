@@ -6,6 +6,14 @@
 TMP = { value = ".tmp", relative = true, force = true }
 TEMP = { value = ".tmp", relative = true, force = true }
 
-# GNU toolchain is what this machine has (gcc from scoop/MinGW). There is no ld.lld on PATH,
-# and rust-lld is not shipped with the GNU toolchain, so the default MinGW linker is kept.
-# MSVC Build Tools are not installed either. See PROGRESS.md.
+# GNU toolchain (gcc from scoop/MinGW); MSVC Build Tools are not installed.
+#
+# Linking: the GNU toolchain does ship rust-lld (lib/rustlib/<target>/bin/gcc-ld/ld.lld.exe).
+# `aria/build.rs` and `aria-avatar/build.rs` point gcc at it with `-fuse-ld=lld` as a per-binary
+# link arg, NOT via rustflags here: rustflags are part of every crate's fingerprint, so setting
+# them would rebuild all of Bevy and Slint, while a link arg only relinks. `ARIA_GNU_LD=1` falls
+# back to MinGW's ld. See PROGRESS.md for timings.
+#
+# Always build the whole workspace (`cargo build`, or scripts/run.ps1). `cargo build -p <crate>`
+# resolves features for that crate alone, which can flip features on shared dependencies and
+# rebuild large parts of the tree.

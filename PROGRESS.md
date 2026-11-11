@@ -1,7 +1,29 @@
 # Aria — Refactor Progress
 
-Source of truth for what is done, what is next and what is deliberately deferred.
-Companion to `ARIA-HANDOFF.md`.
+Source of truth for what is done and what is deliberately deferred. (`ARIA-HANDOFF.md`, which
+earlier revisions referred to, is not in the repository.)
+
+The Python/WebView implementation is a **reference, not a spec**: its tuning numbers are kept
+where they work, and behaviour is changed where something better is possible. Deviations are
+called out below.
+
+---
+
+## Status
+
+| Phase | State |
+|---|---|
+| 0 Environment | done |
+| 1 Cleanup | done |
+| 2 Stability | done |
+| 3 Avatar renderer spike | done (layered-window path) |
+| 4 Protocol, supervision, window split | done |
+| 5 Avatar behaviour | **done** |
+| 6 WebView removal | done |
+| 7 Polish | **done** |
+| 8 Split `app.rs` | **done** |
+| 9 Performance pass | **done** (measurements below) |
+| Build speed | **done** (measurements below) |
 
 ---
 
@@ -11,269 +33,253 @@ Companion to `ARIA-HANDOFF.md`.
 |---|---|
 | Repo root | `C:\Users\Aki\Documents\Backup\Aria` |
 | Toolchain | `stable-x86_64-pc-windows-gnu` (Rust 1.99.1) — **GNU, not MSVC** |
-| Linker | MinGW `gcc` from scoop. No MSVC Build Tools installed (no `vswhere`, no `link.exe`). `ld.lld` is not on PATH and the GNU toolchain ships no `rust-lld`, so no fast-linker override is set. |
-| Backup | `C:\Users\Aki\Documents\Aria-backup-2026-11-11.zip` (verified: 19 `.py`, 25 `.rs`, 8 `.slint`, the `.vrm`) |
+| Linker | MinGW `gcc` driving the toolchain's own **rust-lld** (see Build speed). No MSVC Build Tools. |
+| Backup | `C:\Users\Aki\Documents\Aria-backup-2026-11-11.zip` (19 `.py`, 25 `.rs`, 8 `.slint`, the `.vrm`) |
 | Archive | `C:\Users\Aki\Documents\Aria-archive\` (Python sources, Live2D, puppet, plugins, old runtime data) |
 
-### Temp-directory workaround
+`.cargo/config.toml` sets `TMP`/`TEMP` to a repo-local `.tmp`, so build scripts (`ring`, `cc`)
+never touch the permission-restricted system temp.
 
-`.cargo/config.toml` at the repo root sets `TMP`/`TEMP` to a repo-local `.tmp` directory, so build
-scripts (`ring`, `cc`) never touch the permission-restricted system temp. Verified with a clean
-`cargo build` and no manually exported environment variables.
+---
 
-### Build timings
+## Build speed
 
-| Measurement | Time |
-|---|---|
-| Clean build, before workspace/profile changes | **19m 24s** |
-| Incremental build (touch one line in `app.rs`) | **1.3s** |
-| Clean build, whole workspace (aria + avatar + protocol) | **29m 10s** |
-| Incremental, after first full build | **1–2s** |
+### What was slow, and what changed
 
-The workspace clean build is slower than the original because dependencies now compile with
-`opt-level = 2` (needed for Bevy) and there are three crates instead of one.
+1. **Linking.** Phase 0 recorded that the GNU toolchain ships no `rust-lld`. It does:
+   `lib/rustlib/x86_64-pc-windows-gnu/bin/gcc-ld/ld.lld.exe`. `aria/build.rs` and
+   `aria-avatar/build.rs` now pass `-fuse-ld=lld -B<that dir>` as **per-binary link args**.
+   Doing it with `rustflags` would have changed every crate's fingerprint and rebuilt all of
+   Bevy and Slint; a link arg only relinks. `ARIA_GNU_LD=1` switches back to MinGW `ld`.
+2. **`.slint` edits.** The `aria` crate is mostly Slint-generated code. At `opt-level = 1` every UI
+   edit spent ~2 minutes in codegen. `[profile.dev.package.aria] opt-level = 0`; the app does
+   nothing CPU-heavy on its own thread, and every dependency stays at `opt-level = 2`.
+3. **Hidden full rebuilds.** A plain `cargo build` with nothing changed once took **10m 39s**,
+   recompiling `bevy_render` and everything above it. Shared dependencies resolve to different
+   feature sets for `-p aria-avatar` and for the whole workspace (e.g. `image` is `png` alone vs
+   `bmp,jpeg,png`), so alternating `cargo build -p …` and `cargo build` invalidates large parts
+   of the tree. Cargo's workspace feature unification is still unstable on this toolchain
+   (`-Zfeature-unification`), so the rule is: **always build the whole workspace**
+   (`cargo build` or `scripts\run.ps1`). This is noted in `.cargo/config.toml`.
+4. **Windows Defender** scans every rlib and object written. Excluding the build folders needs
+   an elevated shell, so it is packaged as `scripts\dev-setup.ps1` (run once, as Administrator).
+   Not applied by the agent.
 
-Windows Defender exclusions have **not** been added (they need an elevated shell). Recorded here as
-requested.
+### Measured (dev profile, i7-7700HQ, 4C/8T)
+
+| Edit | Before | After |
+|---|---|---|
+| Touch one avatar `.rs` file | 13.1 s | **6.3 s** |
+| Touch one app `.rs` file | 10.4 s | **7.8 s** |
+| Change a `.slint` file | ~126 s | **8.5 s** |
+| No-op build | 1.7 s (10m 39s after a `-p` build) | **1.7 s** |
+
+Clean builds are still dominated by compiling Bevy, wgpu and Slint at `opt-level = 2`
+(29 min recorded in Phase 0). They are rare: toolchain updates or `cargo clean`. The Defender
+exclusion is the remaining lever for them.
 
 ---
 
 ## Phase 1 — Cleanup
 
-Done.
-
-- All Python (`*.py`, `*.bat`, `__pycache__`) moved to the archive. The repo is Rust only.
-- Archived: `witch_live2d\`, `silver_witch.png/.puppet.json`, `checkmark.svg`, `voice_samples\`
-  (grep confirmed no Rust reference), `cua-plugin\`, `tinyfish-mcp\`, `ARIA-TECHNICAL-REPORT.md`.
-- Deleted: probe artefacts (`probe.c/.o`, `probe_bin`, `probe_crate`, `build_probe.rs`,
-  `probe.slint`), all `build_*.txt` / `*_err.txt` / `*_out.txt` scratch logs, the empty `logs\`,
-  and the zero-byte orphan in `assets\tts_cache\`.
-- Kept as the behaviour spec: `docs\reference\vtuber_stage.html`, `docs\reference\stage_bridge.js`.
-- Runtime data now lives in `%APPDATA%\Aria\` (`data_dir()` in `config.rs`): settings, memory,
-  launch cache, PID file, logs, TTS cache. A one-time migration copies the old repo-root files
-  across on startup and logs that it happened.
-- Removed unused dependencies/features: `tray-icon`; the `windows` features
-  `Win32_Graphics_Dwm` and `Win32_UI_Controls` (grep-verified unused).
-- Removed debug instrumentation: `Stage::probe`, `Stage::enforce_transparency`, the `DIAG`
-  page-load handler and its call site.
-- Removed superseded `check_game_dodge` (a duplicate of `apply_game_state`).
-- Unwired features kept and marked `#[allow(dead_code)] // TODO(wire-up):`:
-  `brain::Attachment`, `brain::analyze_dropped`, `config::assets_dir`,
-  `config::AVATAR_SCALE_PRESETS`, `offline::sample_tool_result`,
-  `proactive::{focus_remaining_minutes, start_focus, stop_focus}`, `util::today_hour_minute`,
-  `voice::set_speaking`, `win32::handle_is_null`.
-- Workspace created: root `Cargo.toml` (`resolver = "2"`, members `aria` + `aria-avatar` +
-  `aria-protocol`, `exclude = ["vendor/msedge-tts"]`, profiles), `Cargo.lock` at the root,
-  profiles removed from `aria\Cargo.toml`.
-- `.gitignore` and `settings.example.json` (API keys blanked) written.
-
----
+Done. Python, Live2D and puppet assets archived; runtime data in `%APPDATA%\Aria\`; dead code
+removed or marked `TODO(wire-up)`; workspace created with `aria`, `aria-avatar`,
+`aria-protocol`; `msedge-tts` vendored (see Phase 2).
 
 ## Phase 2 — Stability
 
-Done.
-
-1. **Slint binding loops — zero warnings.** The root cause was `ScrollView { width: parent.width;
-   height: parent.height }` inside a `HorizontalLayout`, plus the sidebar's
-   `y: sidebar.height - 76px` footer and its `x: parent.width - 1px` hairline. Replaced with
-   `horizontal-stretch`/`vertical-stretch`, layout padding and a stretch spacer. No child sizes
-   itself from its parent any more, and the build prints **zero** binding-loop warnings.
-2. **TLS double provider — fixed.** `msedge-tts 0.4.1` hard-coded
-   `rustls::crypto::aws_lc_rs` and pulled `rustls` with default features. It is now **vendored** at
-   `vendor/msedge-tts` with `rustls` pinned to `["std", "ring", "tls12", "logging"]` and the
-   provider switched to `ring`. `cargo tree -i aws-lc-sys` finds no package; only `ring` remains, so
-   the `aws-lc-sys` C build is gone. The explicit `install_default()` of the ring provider is kept
-   in `main.rs`, because both `ureq` and `tungstenite` still build rustls configs.
-3. **RefCell re-entrancy — fixed.** `try_with_app_mut` no longer silently drops work: calls made
-   while a mutation is in flight are queued in a thread-local `DEFERRED` list and drained as soon
-   as the outer mutation ends. A hard cap (64) prevents an unbounded feedback loop and logs a
-   warning. `post` (cross-thread) and `defer` (UI thread) both route through it.
-4. **Timers — owned.** All nine leaked `slint::Timer`s now live in `App::timers: Vec<Timer>`, so
-   they stop when the app is dropped. The `main.rs` single-shot styling timer is held in a local
-   instead of being leaked.
-5. **Headpat rate limit:** the detector moved into the avatar process in Phase 5; the JS-side 5 s
-   limit is superseded there.
-
----
+Done. Zero Slint binding-loop warnings; a single TLS provider (`ring`, `aws-lc-sys` gone);
+re-entrant UI mutations are queued instead of dropped; all timers owned by `App`.
 
 ## Phase 3 — Avatar renderer spike
 
-Done, with the **layered-window fallback** (the swap-chain path is impossible on this stack).
-
-### Why the fallback was required
-
-`wgpu-hal` reports `composite_alpha_modes: vec![Opaque]` for any plain Win32 HWND
-(`wgpu-hal-30.0.1/src/dx12/adapter.rs`; the Vulkan backend matches). A Bevy swap chain therefore
-**cannot** composite over the desktop, whatever `composite_alpha_mode`, `transparent: true` or
-`ClearColor::NONE` say. Verified directly: Vulkan rejects `PreMultiplied`, and DX12 stays opaque
-black over the desktop.
-
-### What was built
-
-- `aria-avatar` crate: **headless Bevy 0.20 + `bevy_vrm1` 0.11**, no `WinitPlugin`, no swap chain.
-  The scene renders into an RGBA8 `Image` (`Image::new_target_texture`), is captured through
-  `Screenshot::image`, and is presented with `UpdateLayeredWindow` as premultiplied BGRA.
-- The window lives on its **own thread with a real message loop**. `UpdateLayeredWindow` sends
-  synchronous messages to the window's owner thread; with nobody pumping that queue the call
-  deadlocks. That is exactly what happened on the first attempts: the process sat blocked,
-  `Not Responding`, with no frames presented.
-- The camera receives `RenderTarget::Image` in the *same* system that spawns it. Attaching it from
-  a separate `Startup` system silently matched nothing, because `commands.spawn` is invisible to
-  other systems until deferred commands are applied.
-- Model loading uses an absolute path with `UnapprovedPathMode::Allow`, needed for arbitrary
-  `custom_vrm_path` values, and an asset root resolved exe-first then `aria-avatar/assets`.
-- Window: 520x740 physical px, layered, frameless, `WS_EX_TOOLWINDOW` (no taskbar or Alt-Tab),
-  always-on-top. The main app owns its geometry via `SetWindowPos` on the HWND it reports.
-
-### Custom model check
-
-`C:/Users/Aki/Downloads/vrms/freepurplecozytuberfixedshoes.vrm` (17.0 MB) parses as `"VRMC_vrm"`,
-so it is **VRM 1.0**. No conversion needed, and no VRM 0.x support was added.
-
-### Measured
-
-| Metric | Value |
-|---|---|
-| Backend / adapter | Vulkan / NVIDIA GTX 1060 (Dx12 also works) |
-| Alpha path | layered window, premultiplied BGRA |
-| Working set after 60 s | ~529 MB |
-| CPU over 60 s | 28.3 s (roughly half of one core at 30 FPS) |
-| Frame pace | 30 FPS (explicit pacing; headless has no vsync) |
-| Stability | 60 s continuous, no panic |
-
-Screenshot: `docs\screenshots\phase3-final-proof.png`, the avatar over a live desktop with desktop
-text visible through the gaps around the model.
-
----
+Done, with the layered-window path. `wgpu-hal` only reports `Opaque` composite alpha for a plain
+Win32 HWND, so the scene renders headless into an `Image`, is read back, and is shown with
+`UpdateLayeredWindow` (premultiplied BGRA). The window lives on its own thread with a message
+loop, since `UpdateLayeredWindow` deadlocks without one.
 
 ## Phase 4 — Protocol, supervision, window split
 
-Done. Verified end to end by running the real `aria.exe`.
-
-### What was built
-
-- **`aria-protocol`** crate: `serde`-only shared types, one JSON object per line, tagged enums
-  (`{"kind":"set_state","data":{…}}`). Three unit tests cover the round-trip and prove a malformed
-  or unknown line is ignorable rather than fatal.
-- **`aria\src\avatar_link.rs`**: binds `127.0.0.1:0`, generates a token, spawns
-  `aria-avatar.exe --port --token --model`, validates the renderer's `Hello` token, and restarts it
-  with backoff (1 s, 2 s, 5 s, then gives up after 4 attempts). The child goes into a Windows job
-  object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so it cannot outlive the app.
-- Method names mirror the old `Stage` (`set_state`, `set_mouse_look`, `set_peeking`, …), so call
-  sites in `app.rs` barely changed. `AvatarLink` uses interior mutability, which deleted every
-  `stage.borrow_mut()` in the codebase.
-- **Single body layout**: `set_window_pos` is the one funnel and now calls `layout_windows`, so
-  walking, dragging, edge snap, game dodge, perch, boredom roam and initial placement all move the
-  chrome and the avatar window together.
-- Added `win32::move_and_size_window`, `win32::put_in_kill_on_close_job`,
-  `win32::set_click_through`, and the `Win32_System_JobObjects` feature.
-
-### Two bugs worth recording
-
-1. **`Ready` was never delivered.** The renderer queued it in a `pending` buffer for a socket
-   handle the app had not yet attached a writer to. The link now flips to `connected` and flushes
-   that queue when the window handle becomes available; without this the app never learned the
-   HWND and the avatar stayed at (0,0). Found by driving the renderer against a hand-written
-   listener and seeing only `hello` arrive.
-2. **Input needed protocol additions** (`SetPointer`, `SetClickThrough`, `Event::HoverChanged`),
-   because a layered window receives no input of its own.
-
-### Verified
-
-| Check | Result |
-|---|---|
-| `aria.exe` spawns `aria-avatar.exe` | yes, both processes live |
-| Token handshake | `aria` logs `avatar renderer ready, hwnd=…` |
-| Layout follows the app | avatar at (1596, 443), app at (1596, 522) |
-| Kill the renderer | restarted within ~8 s, layout re-applied |
-| Kill `aria.exe` | renderer dies with it (job object) |
-
----
+Done. `aria-protocol` carries line-delimited JSON; `avatar_link.rs` spawns `aria-avatar.exe`,
+validates its token, restarts it with backoff and puts it in a kill-on-close job object.
 
 ## Phase 5 — Avatar behaviour
 
-**Partially done.** This is where the work stopped, so the split is recorded precisely.
+**Done.** All items from the original split:
 
-| # | Item | State |
+| # | Item | How |
 |---|---|---|
-| 1 | Expressions from emotion | **done** — `SetExpressions` per emotion plus blink, smoothed |
-| 2 | Mouth / lip-sync | **done** — `aa`/`oh` smoothed, procedural flap fallback when `talking` |
-| 3 | Idle + per-emotion bone posing | **done** — breathing/sway, walk, dance, groove, sit, happy, annoyed, talking, idle |
-| 4 | Hand posing | **not done** — fingers are not driven yet |
-| 5 | Walking / facing | **done** — stride cycle, facings, yaw interpolation at `dt * 7` |
-| 6 | Peeking + drag-inertia lean | **done** — lean ±0.14, body roll/pitch from inertia |
-| 7 | Input + gesture detectors | **done** — drag, poke, middle-click, right-click, headpat (4 reversals / 1.25 s, 5 s cool-down, 8 px steps), shake (5 / 0.85 s) |
-| 8 | Click-through on transparent areas | **partial** — `WS_EX_TRANSPARENT` toggling is wired, but "over the model" uses an **approximate** screen box (30% × 42% of the window), not a projected bone hull |
-| 9 | Camera framing + lighting presets | **framing done**, lighting presets **not done** (the preset travels over the wire and is ignored) |
-| 10 | Music vibe / groove body motion | **partial** — the `groove` pose branch exists; `SetMusicVibe` energy is not consumed |
-| 11 | Wardrobe props | **not done** — `SetProps` is received and stored, nothing is attached to bones |
-| 12 | Headpat hearts | **not done** (optional in the handoff) |
-| 13 | Music spectrum removed | **done** (deleted in Phase 6) |
+| 1 | Expressions from emotion | One `SetExpressions` per frame (see bug list) with the reference weights for blink, aa, oh, angry, happy, relaxed, surprised; head-pat and sleepy overrides |
+| 2 | Mouth / lip-sync | Real RMS envelope from the playing TTS (Phase 7); procedural flap when no envelope arrives |
+| 3 | Idle + emotion posing | `posing.rs`, ported branch by branch from `animate()` |
+| 4 | Hand posing | `applyHandPosing` ported: wrist plus 3 joints × 5 fingers per hand, per emotion |
+| 5 | Walking / facing | Stride, arm swing, yaw toward walk direction; body yaw also follows the cursor |
+| 6 | Peeking + drag inertia | Lean, head tilt, yaw; inertia smoothed at the reference rate |
+| 7 | Input + gestures | Drag, shake, head-pat, double-click poke, right-click menu, middle-click dial |
+| 8 | Click-through | **Pixel-accurate**: the hit mask is the alpha of the last presented frame |
+| 9 | Framing + lighting | 28° lens like the reference; day/dawn/sunset/night presets; `auto` follows the clock |
+| 10 | Music vibe | Groove branch scaled by the loudness the app measures from media apps |
+| 11 | Wardrobe props | All 13, with the reference's geometry, materials and per-frame motion |
+| 12 | Head-pat hearts | Painted into the presented frame in screen space |
+| 13 | Spectrum removed | done in Phase 6 |
 
-### Posing design decision
+### The normalized rig (`aria-avatar/src/rig.rs`)
 
-The reference applies its numbers to three.js's *normalized* humanoid node, which starts at
-identity. `bevy_vrm1` writes the rig's real rest orientation onto the bone transforms, so blindly
-overwriting produced a T-pose and composing onto the rest produced a T-pose too. Final rule, in
-`posing.rs`: **spine/chest/neck/head/hips compose onto their captured rest rotation; limbs are set
-absolutely.** That reproduces the reference pose — screenshot `phase5-arms.png` shows the arms down.
+The old `posing.rs` wrote reference numbers straight onto raw bones, with spine/head composed
+onto rest and limbs set absolutely. On the bundled model that produced a **T-pose** (the arms
+stuck straight out; see the first screenshot of this session), and the numbers had been hand-
+tweaked away from the reference to compensate.
 
-Bone entities are resolved **once per model** and cached in `AvatarState::bones`, together with the
-rest rotations captured before the first pose is applied.
+The reference drives three-vrm's *normalized* bones, so `rig.rs` now does what
+`VRMHumanoidRig.update()` does:
 
-### Bevy ECS pitfalls hit (read before touching `behaviors.rs`)
+```
+raw_local = P⁻¹ · N · P · rest_local      P = parent's rest rotation in model space
+```
 
-- All `Transform` access in `animate` must live in one `ParamSet`. Four separate
-  `Query<&mut Transform, …>` parameters trip `error[B0001]` at runtime even when their filters look
-  disjoint. Adding `"debug"` to the Bevy features makes the error name the system instead of
-  printing `<Enable the debug feature to see the name>`.
-- `apply_pose` is generic over `QueryFilter` so it accepts a `ParamSet` member directly.
+`bevy_vrm1` already snapshots `RestTransform` / `RestGlobalTransform` per bone, so this is exact
+for any rig, and the reference numbers are used **verbatim**. Bones a branch does not mention
+return to rest each frame. Props hang off a per-bone "attachment frame" child whose rotation is
+the inverse rest rotation, which makes child space equal normalized space, so the reference prop
+offsets apply unchanged.
 
-Screenshots: `docs\screenshots\phase5-arms.png` (idle pose, arms down, no T-pose),
-`phase5-rest.png`, `phase5-happy.png`, `phase5-posed.png`.
+Rig resolution is an **exclusive system**: in Bevy 0.20 resources are entities, so a
+`Query<EntityRef>` conflicts with `ResMut<AvatarState>` (`B0001` at startup).
+
+### Deliberate deviations from the reference
+
+- **"half" framing is waist-up** (`1.22 × height`, target `+0.22 × height`). The reference's
+  1.55 with a 28° lens actually showed knees-up, wasting half of the small stage on legs.
+  "full" and "face" keep the reference numbers.
+- **The avatar window is the stage slot**, rendered 1:1 at its size (260×370 at scale 1). It was
+  a fixed 520×740 surface anchored at the mascot window's top-left, so `avatar_scale` (including
+  the game-mode shrink to 0.52) had no effect and the avatar ran off the right screen edge.
+- **Gestures need a press on the model.** The app forwards the *global* mouse state, and the old
+  detector started a drag on any left press, so dragging anywhere on the desktop could drag Aria.
+- Head-pat counts only while the cursor is over the model's head band, not anywhere in the band.
 
 ---
 
 ## Phase 6 — WebView removal
 
-Done.
-
-- Deleted `aria\src\stage.rs`, `aria\src\assets.rs`, `aria\src\stage_bridge.js`,
-  `assets\vtuber_stage.html`, and the `mod` lines for the first two.
-- Dropped the `wry` and `tiny_http` dependencies; `cargo tree` now shows neither, nor any
-  `webview2` crate.
-- Removed the `avatar_mode`, `live2d_source`, `puppet_source` and `music_spectrum_enabled`
-  settings, their Control Center controls (the Live2D / artwork buttons and the spectrum toggle),
-  and the `on_load_live2d` / `on_load_puppet` / `on_toggle_spectrum` handlers. `switch_avatar` now
-  just reloads the configured VRM.
-- `build.rs` no longer watches `stage_bridge.js`.
-- Verified: app runs, **0 `msedgewebview2.exe` processes** spawned.
-
-`docs\reference\` is kept, as the handoff requires, until the last Phase 5 item is ported.
+Done. `wry`, `tiny_http`, the stage HTML/JS and the Live2D/puppet/spectrum settings are gone.
+`docs\reference\` is kept as the behaviour reference.
 
 ---
 
-## Noticed, not fixed
+## Phase 7 — Polish
 
-- `aria\src\app.rs` contains mojibake (double-encoded UTF-8) inside several user-facing strings,
-  e.g. the "Continuous screen vision is on …" line and "Thinking …". They render as garbage in the
-  bubble. Root cause is a bad encoding round-trip in the original port; fixing them is a text-only
-  change and is **not** part of any current phase. Candidate for Phase 7.
-- The `window_size` / `STAGE_BASE_W` constants assume a single-monitor work area.
-- Writing files through PowerShell `Set-Content` corrupted UTF-8 twice (an em dash became `â€”`).
-  Use the file-editing tools for anything with non-ASCII content.
-- `aria-avatar` currently builds with 12 warnings, mostly unused protocol variants that Phase 5
-  items 4/9/11 will consume.
+**Done.**
+
+| Item | How |
+|---|---|
+| TTS RMS lip-sync | `voice.rs` wraps the rodio decoder in `LipSync`: ~20 ms windows give RMS (mouth open) and zero-crossing rate (rounded `oh` vs open `aa`). The app forwards it at 30 Hz. |
+| Real end of speech | `SPEAKING` drops when the audio actually ends, not after a duration guessed from MP3 size; `stop_speaking` now really stops playback. |
+| Bubble growth | The window takes the bubble's laid-out height instead of a fixed 74 px, grows as the text types out, and grows **upward** so the avatar does not jump. |
+| `SetFps` in game mode | 10 FPS while a game is detected, 30 otherwise; the renderer boosts to 45 while talking, walking or dancing, like the reference. |
+| Pause when hidden | 0 FPS (camera off, window hidden) while the session is locked or the mascot is not visible. |
+| Click-through that works | The stage slot is cut out of the Slint window's region (`SetWindowRgn`); before, the transparent Slint window swallowed every click over the avatar's empty space. |
+| No focus stealing | Avatar window is `WS_EX_NOACTIVATE` and answers `MA_NOACTIVATE`. |
+| Mojibake | Fixed (see below). |
+| HiDPI | Mascot window sizes are logical; the avatar slot is computed with the scale factor. |
+
+### Mojibake
+
+The "noticed" garbage strings were text double-encoded (UTF-8 read as Windows-1252, re-encoded)
+**many times over**: each `—` had grown to ~10 KB. `app.rs` went from 125k to 58k characters.
+Every run of non-ASCII characters in `aria/src`, `aria/ui` and the avatar crates was decoded
+until stable; real characters (em dash, ellipsis, curly quotes, `·`, emoji) fail the round trip
+and were left alone. The same old tooling had also put a blank line before every `use`, which
+split two strings mid-word (`"I'll\n\nuse text"`, `"play pa\n\nuse music"`); both are fixed.
 
 ---
 
-## Next
+## Phase 8 — Split `app.rs`
 
-1. Finish Phase 5 items 4 (hands), 8 (true bone-bounds hit test), 9 (lighting presets), 10 (music
-   energy), 11 (wardrobe props).
-2. Phase 7 — polish: TTS RMS lip-sync envelope, bubble growth, `SetFps` in game mode, pause when
-   hidden.
-3. Phase 8 — split `app.rs` into modules.
-4. Phase 9 — performance pass and measurements.
+**Done.** `app.rs` (1,700 lines, previously a single file with mangled formatting) is now:
 
-`git log` at this point: Phases 0-2 (`initial`), then 3, 4, 6 and the bulk of 5 are committed.
+| Module | Contents |
+|---|---|
+| `app.rs` | `App` state, UI-thread plumbing (`with_app`, `post`, `defer`), `init`, `cleanup` |
+| `app/chat.rs` | `say`, bubble, persona accent, microphone, prompts |
+| `app/body.rs` | geometry, walking, dragging, edge snap, peeking, the avatar slot and region |
+| `app/ticks.rs` | every timer, render policy, game dodge, music vibe, boredom |
+| `app/menus.rs` | mascot buttons, global hotkeys, context menu, quick dial |
+| `app/avatar.rs` | renderer start-up, its events and settings, poke / shake / head-pat |
+| `app/studio.rs` | Control Center (unchanged) |
+
+The split was mechanical (rustfmt, then each top-level function moved by name), so behaviour is
+unchanged. Functions are `pub(crate)` and re-exported from `app`, so callers still use
+`crate::app::say` and friends. Both crates build with **zero warnings**.
+
+---
+
+## Phase 9 — Performance
+
+| Change | Effect |
+|---|---|
+| Avatar renders at the slot size (260×370) instead of 520×740 | 4× fewer pixels to render, read back and premultiply |
+| Bevy task pools capped at 3 threads | renderer CPU 24.5 → 17.7 s per minute (dev build), 31 → 26 threads |
+| Premultiply fast paths for alpha 0 / 255 and a division-free multiply | most of the frame is fully transparent |
+| One frame copy fewer (the frame `Vec` moves to the window thread) | |
+| Window thread blocks on its queue (`recv_timeout`) instead of polling every 2 ms | |
+| App → renderer messages deduplicated (look, pointer, mouth, fps, rect) | the 30 Hz tick no longer writes 3 lines every frame |
+| TTS text regexes compiled once | was recompiled for every spoken line |
+
+### Measured (60 s at idle, after a 20 s warm-up)
+
+| Build | Process | CPU per minute | Working set | Threads |
+|---|---|---|---|---|
+| Phase 3 spike (520×740, dev) | aria-avatar | 28.3 s | ~529 MB | — |
+| This session, dev | aria-avatar | 17.7 s | 574 MB | 26 |
+| This session, dev | aria | (not readable from the sandboxed shell) | 76 MB | 14 |
+
+Release numbers are **not measured yet**: the release build (thin LTO over Bevy) was stopped by
+the agent host because the machine ran low on memory. Run `.\scripts\run.ps1 -Release` and repeat
+the 60 s sample. Expect the renderer to drop further, since dev builds run Bevy with debug
+assertions.
+
+Most of the renderer's memory is the Vulkan driver and wgpu; the model itself is small.
+
+---
+
+## Bugs found and fixed along the way
+
+- **UI-thread panic on any reply over 160 characters**: `format_speech` split sentences with a
+  look-behind regex, which the `regex` crate rejects at runtime. It ran inside `speak_async` on
+  the UI thread.
+- **Only one expression ever applied**: `SetExpressions` replaces every override, and it was
+  triggered once per expression per frame, so blink (sent last) erased the emotion.
+- **Loading a model spawned a second avatar**: the previous VRM root was never despawned.
+- `ModelLoaded` was never sent; load failures now fall back to the bundled model and report it.
+- Poke, right-click menu and middle-click dial were listed as done but were never detected.
+- The avatar window could snap back to (0, 0): two processes moved it (the app with
+  `SetWindowPos`, the renderer with `UpdateLayeredWindow`'s destination point). The renderer's
+  window thread is now the only mover; the app sends `SetWindowRect`.
+- Resizing the layered DIB deselected the new bitmap (wrong release order), so every later
+  `UpdateLayeredWindow` failed with error 31.
+- Registry key names in the app launcher carried 256 characters of trailing NULs.
+- While speaking, the 30 Hz tick reset `facing_right`/`moving` to false every frame.
+- A release renderer would have opened its own console window (now GUI subsystem and
+  `CREATE_NO_WINDOW`).
+- A date test used a 2025 timestamp but expected 2026.
+
+---
+
+## Verifying
+
+- `cargo test --workspace`: 45 app, 8 avatar, 4 protocol tests pass. New tests cover the
+  gesture gating, double-click poke, hit mask, premultiply, hearts, lighting clock and the
+  normalized idle pose.
+- Standalone preview of the renderer, no app needed:
+  `ARIA_AVATAR_EMOTION=happy ARIA_AVATAR_PROPS=halo,cat_ears ARIA_AVATAR_LIGHTING=sunset
+  ARIA_AVATAR_FRAMING=full ARIA_AVATAR_SIZE=390x555 target\debug\aria-avatar.exe`
+- In debug builds the app's log is mirrored to stderr, so a dev run is readable even when
+  `%APPDATA%\Aria` is not writable (it was not, from the agent's sandboxed shell).
+
+## Not done / open
+
+- Some reference poses look odd on the bundled rig even with exact numbers (e.g. `annoyed`
+  holds the forearms out sideways). They are verbatim ports; retuning them is a design task.
+- Avatar `ModelLoaded` reports an empty expression list (`bevy_vrm1` keeps its registry private).
+- Clean builds are still ~30 min until the Defender exclusion is applied.

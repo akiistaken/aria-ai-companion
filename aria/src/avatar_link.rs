@@ -500,6 +500,14 @@ fn spawn_renderer(shared: &Shared) -> bool {
     if !model.trim().is_empty() {
         cmd.arg("--model").arg(&model);
     }
+    #[cfg(windows)]
+    {
+        // Its output goes nowhere anyway; without this a console-subsystem renderer started from
+        // the windowless release app would flash up a console window.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     match cmd.spawn() {
         Ok(mut child) => {
@@ -529,7 +537,7 @@ fn accept_with_token(listener: &TcpListener, expected: &str) -> Option<TcpStream
     listener.set_nonblocking(true).ok()?;
     loop {
         match listener.accept() {
-            Ok((mut stream, _addr)) => {
+            Ok((stream, _addr)) => {
                 stream.set_nonblocking(false).ok()?;
                 let mut reader = BufReader::new(stream.try_clone().ok()?);
                 let mut line = String::new();

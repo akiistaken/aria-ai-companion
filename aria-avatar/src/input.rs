@@ -60,7 +60,9 @@ pub struct GestureState {
     headpat_dir: i32,
     headpat_reversals: Vec<f32>,
     last_headpat: f32,
-    over_model: bool,
+    /// Last hover state reported; None until the first sample, so the app always learns the
+    /// initial state (click-through stays off until it does).
+    over_model: Option<bool>,
 }
 
 impl GestureState {
@@ -72,8 +74,8 @@ impl GestureState {
         self.previous = sample;
         let pos = sample.position;
 
-        if over != self.over_model {
-            self.over_model = over;
+        if self.over_model != Some(over) {
+            self.over_model = Some(over);
             link.send(Event::HoverChanged { over });
         }
 

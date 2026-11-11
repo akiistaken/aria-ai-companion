@@ -115,7 +115,7 @@ struct MonitorState {
 
 static MONITOR: OnceLock<Mutex<MonitorState>> = OnceLock::new();
 
-pub fn monitor() -> &'static Mutex<MonitorState> {
+fn monitor() -> &'static Mutex<MonitorState> {
     MONITOR.get_or_init(|| {
         Mutex::new(MonitorState {
             last_trigger: 0.0,

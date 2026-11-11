@@ -63,7 +63,6 @@ pub struct AvatarLink {
     /// Events queued before the socket is up.
     pending: Arc<Mutex<VecDeque<Event>>>,
     connected: bool,
-    token: String,
     /// Test-only tap on the outgoing events.
     #[cfg(test)]
     sent: Mutex<Option<Receiver<Event>>>,
@@ -88,7 +87,6 @@ impl AvatarLink {
             outbox: out_tx,
             pending,
             connected,
-            token: args.token,
             #[cfg(test)]
             sent: Mutex::new(None),
         }
@@ -104,7 +102,6 @@ impl AvatarLink {
             outbox: out_tx,
             pending: Arc::new(Mutex::new(VecDeque::new())),
             connected: true,
-            token: String::new(),
             sent: Mutex::new(Some(out_rx)),
         }
     }
@@ -249,7 +246,7 @@ fn spawn_connection(
 
 /// Applies socket commands to the ECS once per frame, so game logic stays single-threaded.
 pub fn pump_link(
-    mut link: ResMut<AvatarLink>,
+    link: ResMut<AvatarLink>,
     mut state: ResMut<crate::behaviors::AvatarState>,
     mut hearts: ResMut<crate::hearts::Hearts>,
     mut commands: Commands,

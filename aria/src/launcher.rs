@@ -247,12 +247,14 @@ fn registry_app_path(name: &str) -> Option<String> {
             let mut index = 0u32;
             loop {
                 let mut buf = [0u16; 256];
-                let mut len = buf.len() as u32;
                 if RegEnumKeyW(key, index, Some(&mut buf)) != ERROR_SUCCESS {
                     break;
                 }
                 index += 1;
-                let sub = String::from_utf16_lossy(&buf[..len as usize]);
+                // The name is NUL-terminated inside the buffer; without trimming, every key name
+                // carried the rest of the buffer as NULs.
+                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                let sub = String::from_utf16_lossy(&buf[..len]);
                 if !sub.to_lowercase().contains(name) {
                     continue;
                 }
