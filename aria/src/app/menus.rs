@@ -99,12 +99,16 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
         if let Some(ui) = weak.upgrade() {
             // The ⋯ button: the menu right-click used to open.
             ui.on_open_menu(move || {
-                // Open just above the bar, so the menu never covers the bar or hides behind it.
+                // Open just above the bar (which sits above her head), so the menu never covers
+                // the bar or hides behind it.
                 let cursor = crate::input::cursor_position();
                 let (_, y) = app.borrow().pos;
-                let (_, h) = window_size(&app);
+                let bar_top = {
+                    let a = app.borrow();
+                    let sf = a.ui.window().scale_factor();
+                    y + ((a.ui.get_stage_y() - a.ui.get_chrome_height()) * sf).round() as i32
+                };
                 let sf = app.borrow().ui.window().scale_factor();
-                let bar_top = y + h - (53.0 * sf).round() as i32;
                 open_context_menu(&app, (cursor.0, bar_top - (6.0 * sf).round() as i32));
             });
         }
@@ -227,6 +231,7 @@ pub(crate) fn open_studio(app: &AppHandle) {
 pub(crate) fn open_quick_dial(app: &AppHandle) {
     if let Some(dial) = app.borrow().dial.as_ref() {
         let _ = dial.window().show();
+        hide_from_taskbar(dial.window());
         return;
     }
     let dial = match QuickDial::new() {
@@ -242,6 +247,7 @@ pub(crate) fn open_quick_dial(app: &AppHandle) {
         .window()
         .set_position(PhysicalPosition::new(cx - 130, cy - 130));
     dial.show().ok();
+    hide_from_taskbar(dial.window());
     app.borrow_mut().dial = Some(dial);
 }
 
@@ -262,6 +268,7 @@ fn place_menu(menu: &ContextMenu, at: (i32, i32)) {
 pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
     if let Some(menu) = app.borrow().menu.as_ref() {
         let _ = menu.window().show();
+        hide_from_taskbar(menu.window());
         place_menu(menu, at);
         return;
     }
@@ -277,6 +284,7 @@ pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
         .window()
         .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
     menu.show().ok();
+    hide_from_taskbar(menu.window());
     // Its size is only known once shown.
     place_menu(&menu, at);
     app.borrow_mut().menu = Some(menu);
@@ -390,6 +398,7 @@ pub(crate) fn wire_menu(menu: &ContextMenu) {
         });
     }
     menu.on_quit(move || {
+        crate::tray::remove();
         let _ = slint::quit_event_loop();
         std::process::exit(0);
     });

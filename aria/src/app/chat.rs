@@ -20,6 +20,8 @@ pub(crate) fn apply_persona(app: &AppHandle) {
         ui.set_accent_edge(hex_to_color(&edge));
         ui.set_persona_badge(profile.short_badge.into());
         ui.set_persona_name(profile.name.into());
+        // The persona also styles how she stands and moves.
+        a.stage.set_mood(&key);
     }
     let color = hex_to_color(profile.accent);
     let wash_color = hex_to_color(&wash);
@@ -95,10 +97,15 @@ pub(crate) fn say(app: &AppHandle, text: &str, emotion: &str, logs: Vec<String>,
         let stage = &a.stage;
         if matches!(emotion, "dance" | "groove") {
             stage.set_music_vibe(true, 1.0);
-        } else if ["idle", "sleepy", "walking", "sit", "annoyed"].contains(&emotion) {
+        } else if [
+            "idle", "sleepy", "walking", "sit", "annoyed", "angry", "sad", "cry", "thinking",
+        ]
+        .contains(&emotion)
+        {
             stage.set_music_vibe(false, 0.0);
         }
-        stage.set_state(emotion, a.facing_right, a.target.is_some(), speak && tts_on);
+        // `talking` is only true while audio really plays; the motion tick keeps it current.
+        stage.set_state(emotion, crate::voice::is_speaking());
     }
     for entry in &logs {
         log::info!("{entry}");
@@ -118,7 +125,16 @@ pub(crate) fn status_for(emotion: &str) -> &'static str {
     match emotion {
         "talking" => "Speaking",
         "happy" => "Feeling good",
+        "laugh" => "Laughing",
         "annoyed" => "Pouting",
+        "angry" => "Fuming",
+        "sad" => "Feeling down",
+        "cry" => "Crying",
+        "thinking" => "Thinking",
+        "surprised" => "Surprised",
+        "shy" => "Flustered",
+        "wave" => "Waving",
+        "dizzy" => "Dizzy",
         "walking" => "Walking",
         "dance" => "Dancing",
         "groove" => "Vibing",
@@ -128,9 +144,23 @@ pub(crate) fn status_for(emotion: &str) -> &'static str {
     }
 }
 
+/// Emotions that are a reaction to something said: they fade back to idle with the bubble.
+/// Sitting, dozing and dancing are things she keeps doing until something else happens.
+fn is_reaction(emotion: &str) -> bool {
+    !matches!(emotion, "idle" | "sit" | "sleepy" | "dance" | "groove")
+}
+
 pub(crate) fn hide_bubble(app: &AppHandle) {
     app.borrow().ui.set_bubble_shown(false);
-    app.borrow_mut().bubble_hide_at = None;
+    {
+        let mut a = app.borrow_mut();
+        a.bubble_hide_at = None;
+        // Still thinking: keep the pose until the reply arrives.
+        if is_reaction(&a.last_emotion) && !a.busy {
+            a.last_emotion = "idle".into();
+            a.ui.set_status_line(status_for("idle").into());
+        }
+    }
     sync_chrome(app);
 }
 
@@ -211,7 +241,11 @@ pub(crate) fn submit_prompt(app: &AppHandle, prompt: String, include_screen: boo
         a.ui.set_draft("".into());
     }
     if config::get().subtitles_enabled {
-        say(app, "Thinking…", "talking", vec!["thinking".into()], false);
+        say(app, "Thinking…", "thinking", vec!["thinking".into()], false);
+    } else {
+        // No bubble, but she still visibly thinks it over.
+        app.borrow_mut().last_emotion = "thinking".into();
+        app.borrow().stage.set_state("thinking", false);
     }
     std::thread::spawn(move || {
         let reply = brain().chat(
@@ -229,12 +263,9 @@ pub(crate) fn submit_prompt(app: &AppHandle, prompt: String, include_screen: boo
                 a.busy = false;
                 a.ui.set_busy(false);
             }
-            let emotion = if app.borrow().target.is_some() {
-                "walking".to_string()
-            } else {
-                reply.emotion.clone()
-            };
-            say(app, &reply.text, &emotion, reply.logs.clone(), true);
+            // Walking (if the reply sent her somewhere) comes from the movement itself, so she
+            // can walk off happily or sulkily.
+            say(app, &reply.text, &reply.emotion, reply.logs.clone(), true);
             apply_persona(app);
         });
     });

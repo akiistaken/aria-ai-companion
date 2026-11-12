@@ -142,7 +142,6 @@ impl AvatarLink {
             }
         }
     }
-
 }
 
 /// Connects, then owns both directions of the socket for the life of the process.
@@ -264,17 +263,12 @@ pub fn pump_link(
     for command in drained {
         match command {
             Command::LoadModel { path } => state.pending_model = Some(path),
-            Command::SetState {
-                emotion,
-                facing_right,
-                moving,
-                talking,
-            } => {
-                state.emotion = emotion;
-                state.facing_right = facing_right;
-                state.moving = moving;
+            Command::SetState { emotion, talking } => {
+                state.emote = crate::emotes::Emote::parse(&emotion);
                 state.talking = talking;
             }
+            Command::SetBody { mode } => state.body = mode,
+            Command::SetMood { persona } => state.style = crate::emotes::Style::for_persona(&persona),
             Command::SetLook { x, y } => {
                 state.look_x = x;
                 state.look_y = y;
@@ -288,10 +282,6 @@ pub fn pump_link(
             Command::SetMusicVibe { active, energy } => {
                 state.music_active = active;
                 state.music_energy = energy;
-            }
-            Command::SetDragInertia { x, y } => {
-                state.target_inertia_x = x;
-                state.target_inertia_y = y;
             }
             Command::TriggerHeadpat => {
                 state.headpat_active = 1.0;

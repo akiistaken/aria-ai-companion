@@ -1,4 +1,4 @@
-﻿//! Aria avatar renderer.
+//! Aria avatar renderer.
 //!
 //! A headless Bevy app that loads a VRM 1.0 model with `bevy_vrm1` (MToon shading, spring bones,
 //! look-at, node constraints), renders it offscreen and presents it through a layered Win32 window
@@ -8,16 +8,23 @@
 // Release builds must not open a console window of their own next to the avatar.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod animator;
 mod behaviors;
+mod demo;
+mod emotes;
+mod face;
 mod hearts;
+mod ik;
 mod input;
 mod layered;
 mod lighting;
 mod link;
-mod posing;
+mod locomotion;
+mod pose;
 mod present;
 mod props;
 mod rig;
+mod spring;
 
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
@@ -31,7 +38,7 @@ pub const DEFAULT_W: u32 = 260;
 pub const DEFAULT_H: u32 = 370;
 
 /// Vertical field of view of the reference stage's camera; the framing distances assume it.
-const FOV_DEGREES: f32 = 28.0;
+pub(crate) const FOV_DEGREES: f32 = 28.0;
 
 fn main() {
     let args = link::Args::parse();
@@ -55,6 +62,8 @@ fn main() {
     };
 
     let mut state = behaviors::AvatarState::with_model(initial_model);
+    // Standalone only: a scripted preview run, or single-state overrides.
+    let demo = (args.port == 0).then(demo::Demo::from_env).flatten();
     if args.port == 0 {
         apply_dev_overrides(&mut state);
     }
@@ -98,6 +107,7 @@ fn main() {
     .init_resource::<present::HitMask>()
     .init_resource::<hearts::Hearts>()
     .init_resource::<input::GestureState>()
+    .init_resource::<animator::Animator>()
     .insert_resource(AvatarLink::new(args))
     .set_runner(run_loop)
     .add_systems(
@@ -117,6 +127,7 @@ fn main() {
             present::apply_viewport,
             present::apply_pause,
             lighting::apply_lighting,
+            demo::drive.run_if(resource_exists::<demo::Demo>),
             behaviors::animate,
             props::sync_visibility,
             props::animate_props,
@@ -125,17 +136,33 @@ fn main() {
             present::request_capture,
         )
             .chain(),
-    )
-    .run();
+    );
+    if let Some(demo) = demo {
+        // A fixed clock makes a scripted run repeatable and independent of how fast it renders.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(demo::STEP_SECS),
+        ))
+        .insert_resource(demo);
+    }
+    app.run();
 }
 
 /// Standalone runs (no `--port`) can preview states without the app:
-/// `ARIA_AVATAR_EMOTION=happy`, `ARIA_AVATAR_PROPS=halo,cat_ears`, `ARIA_AVATAR_FRAMING=full`,
-/// `ARIA_AVATAR_LIGHTING=sunset`, `ARIA_AVATAR_SIZE=260x370`.
+/// `ARIA_AVATAR_EMOTION=happy`, `ARIA_AVATAR_PERSONA=genki`, `ARIA_AVATAR_BODY=held`,
+/// `ARIA_AVATAR_PROPS=halo,cat_ears`, `ARIA_AVATAR_FRAMING=full`, `ARIA_AVATAR_LIGHTING=sunset`,
+/// `ARIA_AVATAR_SIZE=260x370`. For scripted runs that save pictures, see [`demo`].
 fn apply_dev_overrides(state: &mut behaviors::AvatarState) {
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
     if let Some(emotion) = var("ARIA_AVATAR_EMOTION") {
-        state.emotion = emotion;
+        state.emote = emotes::Emote::parse(&emotion);
+    }
+    if let Some(persona) = var("ARIA_AVATAR_PERSONA") {
+        state.style = emotes::Style::for_persona(&persona);
+    }
+    match var("ARIA_AVATAR_BODY").as_deref() {
+        Some("air") => state.body = aria_protocol::BodyMode::Air,
+        Some("held") => state.body = aria_protocol::BodyMode::Held,
+        _ => {}
     }
     if let Some(props) = var("ARIA_AVATAR_PROPS") {
         for prop in props.split(',') {
@@ -164,9 +191,15 @@ fn run_loop(mut app: App) -> AppExit {
     app.finish();
     app.cleanup();
 
+    // A scripted preview runs on its own fixed clock, faster than real time.
+    let scripted = app.world().contains_resource::<demo::Demo>();
     let mut last = std::time::Instant::now();
     loop {
         app.update();
+        if scripted {
+            std::thread::sleep(demo::FRAME_PAUSE);
+            continue;
+        }
 
         let fps = app
             .world()

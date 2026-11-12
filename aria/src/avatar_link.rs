@@ -14,7 +14,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aria_protocol::{Command, Event, PeekSide};
+use aria_protocol::{BodyMode, Command, Event, PeekSide};
 
 /// How many restarts are attempted before the app gives up and reports a status message.
 const MAX_RESTARTS: u32 = 4;
@@ -46,9 +46,9 @@ pub struct AvatarLink {
 #[derive(Default, Clone, PartialEq)]
 struct LastState {
     emotion: String,
-    facing_right: bool,
-    moving: bool,
     talking: bool,
+    body: Option<BodyMode>,
+    mood: String,
     peeking: PeekSide,
     look: (i32, i32),
     mouth: (i32, i32),
@@ -169,27 +169,38 @@ impl AvatarLink {
 
     // ---- Methods mirroring the old `Stage` API -------------------------------------------
 
-    /// Pushes avatar state, but only when something actually changed.
-    pub fn set_state(&self, emotion: &str, facing_right: bool, moving: bool, talking: bool) {
+    /// What she feels and whether her voice is playing, only sent when either changed. Walking
+    /// is not part of it: the renderer reads that off its window's movement.
+    pub fn set_state(&self, emotion: &str, talking: bool) {
         {
             let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-            if last.emotion == emotion
-                && last.facing_right == facing_right
-                && last.moving == moving
-                && last.talking == talking
-            {
+            if last.emotion == emotion && last.talking == talking {
                 return;
             }
             last.emotion = emotion.to_string();
-            last.facing_right = facing_right;
-            last.moving = moving;
             last.talking = talking;
         }
         self.send(Command::SetState {
             emotion: emotion.to_string(),
-            facing_right,
-            moving,
             talking,
+        });
+    }
+
+    /// On the ground, in the air or held. Only sent on change.
+    pub fn set_body(&self, mode: BodyMode) {
+        if !self.changed(|last| last.body.replace(mode) != Some(mode)) {
+            return;
+        }
+        self.send(Command::SetBody { mode });
+    }
+
+    /// The persona, which styles her posture and energy. Only sent on change.
+    pub fn set_mood(&self, persona: &str) {
+        if !self.changed(|last| std::mem::replace(&mut last.mood, persona.to_string()) != persona) {
+            return;
+        }
+        self.send(Command::SetMood {
+            persona: persona.to_string(),
         });
     }
 
@@ -231,10 +242,6 @@ impl AvatarLink {
 
     pub fn set_music_vibe(&self, active: bool, energy: f32) {
         self.send(Command::SetMusicVibe { active, energy });
-    }
-
-    pub fn set_drag_inertia(&self, x: f32, y: f32) {
-        self.send(Command::SetDragInertia { x, y });
     }
 
     pub fn trigger_headpat(&self) {

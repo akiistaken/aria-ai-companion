@@ -77,6 +77,20 @@ pub fn set_owner(owner: isize) {
     wake();
 }
 
+/// Where the window's top-left corner is on the desktop right now, in physical pixels.
+///
+/// The animation measures the window's travel from this instead of trusting a reported speed, so
+/// a foot planted on the taskbar stays on the pixel it was put down on.
+pub fn window_origin() -> Option<(i32, i32)> {
+    let hwnd = HWND_OUT.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return None;
+    }
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut rect) }.ok()?;
+    Some((rect.left, rect.top))
+}
+
 fn wanted_pos() -> Option<(i32, i32)> {
     let packed = WANTED_POS.load(Ordering::SeqCst);
     (packed != i64::MIN).then(|| ((packed >> 32) as i32, packed as i32))

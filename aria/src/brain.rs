@@ -350,11 +350,11 @@ fn capitalize(s: &str) -> String {
 
 fn award_emotion_exp(emotion: &str) {
     let key = match emotion {
-        "happy" | "idle" => ("dere", 3),
-        "annoyed" => ("tsun", 3),
-        "dance" | "walking" => ("hype", 3),
+        "happy" | "idle" | "laugh" | "shy" | "wave" => ("dere", 3),
+        "annoyed" | "angry" => ("tsun", 3),
+        "dance" | "walking" | "surprised" => ("hype", 3),
         "groove" => ("groove", 4),
-        "sit" | "sleepy" => ("devotion", 3),
+        "sit" | "sleepy" | "sad" | "cry" | "thinking" => ("devotion", 3),
         _ => ("dere", 1),
     };
     crate::memory::adjust_emotion(key.0, key.1);
@@ -442,7 +442,7 @@ static MOOD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 fn emotion_regex() -> &'static regex::Regex {
     EMOTION_RE.get_or_init(|| {
         regex::Regex::new(
-            r"(?i)\[EMOTION:\s*(idle|talking|annoyed|walking|happy|dizzy|sleepy|dance|sit|groove)\]",
+            r"(?i)\[EMOTION:\s*(idle|talking|annoyed|angry|walking|happy|laugh|sad|cry|thinking|surprised|shy|wave|dizzy|sleepy|dance|sit|groove)\]",
         )
         .unwrap()
     })
@@ -819,6 +819,13 @@ mod tests {
 
     #[test]
     fn missing_tag_falls_back_to_default() {
+        // Every emotion the renderer can act out must be one the model may ask for.
+        for name in aria_protocol::EMOTIONS {
+            let (_, emotion) = parse_emotion(&format!("[EMOTION: {name}] hi"), "talking");
+            assert_eq!(emotion, *name, "the tag regex is missing {name}");
+        }
+        let (_, emotion) = parse_emotion("[EMOTION: Cry] it is fine", "talking");
+        assert_eq!(emotion, "cry", "tags are case-insensitive");
         let (text, emotion) = parse_emotion("plain", "talking");
         assert_eq!(emotion, "talking");
         assert_eq!(text, "plain");

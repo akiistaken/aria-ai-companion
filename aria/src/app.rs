@@ -6,7 +6,7 @@
 //!
 //! The behaviour lives in child modules, all operating on the shared [`AppHandle`]:
 //! [`chat`] (speech, bubble, mic, prompts), [`body`] (geometry, walking, dragging, the avatar
-//! slot), [`ticks`] (every timer), [`menus`] (buttons, hotkeys, menu, dial), [`avatar`] (the
+//! slot), [`physics`] (gravity, walking and jumping, as pure logic), [`ticks`] (every timer), [`menus`] (buttons, hotkeys, menu, dial), [`avatar`] (the
 //! renderer process and touch reactions) and [`studio`] (the Control Center).
 
 use slint::winit_030::{winit, WinitWindowAccessor};
@@ -25,6 +25,7 @@ mod avatar;
 mod body;
 mod chat;
 mod menus;
+mod physics;
 mod studio;
 mod ticks;
 
@@ -45,9 +46,17 @@ pub struct App {
     pub dial: Option<QuickDial>,
     pub stage: crate::avatar_link::AvatarLink,
     pub pos: (i32, i32),
+    /// Where she is walking to, as a window position; only the x matters, gravity decides y.
     pub target: Option<(i32, i32)>,
+    /// The window she is heading for, to stand on top of it.
+    pub perch_target: Option<isize>,
+    /// Her body under gravity, at the soles of her feet.
+    pub body: physics::Body,
+    /// From the renderer: pixels from the bottom of the avatar window to her soles, and pixels
+    /// per metre. `None` until it first reports, and physics waits until then.
+    pub stage_geometry: Option<(f32, f32)>,
+    pub last_motion: Instant,
     pub post_walk_emotion: String,
-    pub facing_right: bool,
     pub dragging: bool,
     pub drag_origin: Option<(i32, i32, i32, i32)>,
     pub peeking: String,
@@ -214,8 +223,11 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         stage,
         pos: (0, 0),
         target: None,
+        perch_target: None,
+        body: physics::Body::default(),
+        stage_geometry: None,
+        last_motion: Instant::now(),
         post_walk_emotion: "idle".into(),
-        facing_right: false,
         dragging: false,
         drag_origin: None,
         peeking: "none".into(),

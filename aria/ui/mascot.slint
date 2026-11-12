@@ -1,4 +1,7 @@
-// The desktop mascot: avatar stage slot, speech bubble above, command bar below.
+// The desktop mascot, top to bottom: speech bubble, command bar, avatar stage slot.
+//
+// The bar sits above her head, not under her feet: she stands on the taskbar, so anything below
+// the stage would be off the bottom of the screen.
 
 import { Theme, Accent, Glyph, Icon } from "tokens.slint";
 import { SpeechBubble } from "bubble.slint";
@@ -150,7 +153,7 @@ export component MascotWindow inherits Window {
     in-out property <length> stage-w: 260px;
     in-out property <length> stage-h: 370px;
     out property <length> stage-x: (root.width - root.stage-w) / 2;
-    out property <length> stage-y: root.bubble-slot-height;
+    out property <length> stage-y: root.bubble-slot-height + root.chrome-height;
 
     // Hidden until right-click on the avatar (or Alt+Space); auto-hides when idle.
     in property <bool> bar-visible: false;
@@ -218,24 +221,7 @@ export component MascotWindow inherits Window {
             }
         }
 
-        // The avatar stage slot; the WebView2 child renders into this rectangle.
-        Rectangle {
-            width: root.stage-w;
-            height: root.stage-h;
-            background: transparent;
-
-            // Hairline edge shown while docked to a bezel.
-            Rectangle {
-                width: 1.5px;
-                height: parent.height * 0.62;
-                x: 0;
-                y: (parent.height - self.height) / 2;
-                background: Accent.edge;
-                visible: root.peeking;
-            }
-        }
-
-        // Command chrome.
+        // Command chrome, between the bubble and her head.
         Rectangle {
             width: parent.width;
             height: root.chrome-height;
@@ -261,6 +247,13 @@ export component MascotWindow inherits Window {
                 collapse => { root.collapse-bar(); }
                 visible: root.bar-visible;
             }
+        }
+
+        // The avatar stage slot; the renderer's layered window sits exactly over it.
+        Rectangle {
+            width: root.stage-w;
+            height: root.stage-h;
+            background: transparent;
         }
     }
 

@@ -138,12 +138,7 @@ impl GestureState {
                 }
                 if self.dragging && (pos.x != self.last_x || pos.y != self.last_y) {
                     let step_x = pos.x - self.last_x;
-                    let step_y = pos.y - self.last_y;
                     link.send(Event::DragMove);
-                    link.send(Event::DragInertia {
-                        x: (step_x / 16.0).clamp(-1.0, 1.0),
-                        y: (step_y / 16.0).clamp(-1.0, 1.0),
-                    });
                     if step_x.abs() >= SHAKE_STEP {
                         let dir = if step_x > 0.0 { 1 } else { -1 };
                         if self.shake_dir != 0 && dir != self.shake_dir {

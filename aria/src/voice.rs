@@ -390,8 +390,11 @@ fn prune_cache(max_files: usize) {
 /// Synthesizes with Edge neural TTS into `out_file`. Returns true on success.
 fn synthesize(text: &str, emotion: &str, voice_key: &str, out_file: &Path) -> bool {
     let preset = preset(voice_key);
+    // Four voice presets; the full-body emotions borrow the closest one.
     let emo = match emotion {
         "idle" | "talking" | "annoyed" | "walking" => emotion,
+        "angry" => "annoyed",
+        "sad" | "cry" | "sleepy" | "thinking" | "shy" => "idle",
         _ => "talking",
     };
     let (pitch, rate) = match emo {

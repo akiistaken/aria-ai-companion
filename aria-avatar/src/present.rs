@@ -131,6 +131,7 @@ pub fn present_latest(
     mut latest: ResMut<LatestFrame>,
     mut hit: ResMut<HitMask>,
     mut hearts: ResMut<Hearts>,
+    demo: Option<ResMut<crate::demo::Demo>>,
 ) {
     hearts.step(time.delta_secs().min(0.1));
     let Some(mut image) = latest.0.take() else { return };
@@ -154,6 +155,11 @@ pub fn present_latest(
     hit.update(&rgba, width, height);
     if !hearts.is_empty() {
         hearts.paint(&mut rgba, width, height);
+    }
+    if let Some(mut demo) = demo {
+        // A scripted preview keeps its frames as pictures and never shows a window.
+        demo.offer(&rgba, width, height);
+        return;
     }
     if presenter.paused {
         return;

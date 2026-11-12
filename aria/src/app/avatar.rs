@@ -92,7 +92,9 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             apply_avatar_settings(app);
             {
                 let a = app.borrow();
-                stage.set_state(&a.last_emotion, a.facing_right, a.target.is_some(), false);
+                stage.set_state(&a.last_emotion, crate::voice::is_speaking());
+                stage.set_body(a.body.mode);
+                stage.set_mood(&a.persona);
                 stage.set_peeking(&a.peeking);
                 stage.set_music_vibe(a.music_vibing, 0.6);
             }
@@ -119,7 +121,6 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             update_drag(app, cursor);
         }
         Event::DragEnd => end_drag(app),
-        Event::DragInertia { x, y } => app.borrow().stage.set_drag_inertia(x, y),
         Event::Poke => poke(app),
         Event::Shake => shake(app),
         Event::Headpat => headpat(app),
@@ -131,6 +132,15 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             // desktop underneath stays usable.
             app.borrow().stage.set_click_through(!over);
             app.borrow_mut().over_model = over;
+        }
+        // Where her feet are in the window and how big she is: physics stands her on the taskbar
+        // with this, and scales speeds and gravity to her size.
+        Event::Stage {
+            ground_offset,
+            pixels_per_metre,
+        } => {
+            log::info!("avatar stage: feet {ground_offset:.0} px above the slot bottom, {pixels_per_metre:.0} px/m");
+            app.borrow_mut().stage_geometry = Some((ground_offset, pixels_per_metre.max(1.0)));
         }
         Event::Error { msg } => log::error!("avatar error: {msg}"),
     }

@@ -4,7 +4,9 @@
 //! avatar, which is the separate `aria-avatar` process (Bevy + VRM) driven over a local socket
 //! by `avatar_link`.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Windowless in every build: no console window. Logs go to logs/aria.log; under `cargo run` the
+// inherited stderr still mirrors them in debug builds.
+#![windows_subsystem = "windows"]
 
 mod app;
 mod avatar_link;
@@ -22,6 +24,7 @@ mod proactive;
 mod reactions;
 mod sysinfo;
 mod tools;
+mod tray;
 mod util;
 mod voice;
 mod wardrobe;
@@ -48,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ui = app::init()?;
     ui.borrow().ui.show()?;
+    tray::install();
 
     // Styling the native window must happen inside the running event loop: touching the frame
     // before it starts leaves winit waiting on its own window creation. The timer is kept alive
@@ -62,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     slint::run_event_loop_until_quit()?;
 
+    tray::remove();
     app::cleanup(&ui);
     let _ = std::fs::remove_file(&pid_file);
     Ok(())
@@ -143,7 +148,9 @@ fn setup_native_window(window_title: &str) {
             0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-        log::info!("native window styled: frameless + transparent");
+        // She lives in the tray, not on the taskbar.
+        crate::win32::hide_from_taskbar(hwnd.0 as isize);
+        log::info!("native window styled: frameless + transparent, off the taskbar");
     }
 }
 

@@ -1,6 +1,9 @@
 //! Where Aria is: window geometry, walking, dragging, edge snap, peeking and the avatar slot.
+//! The motion itself (gravity, walking, jumping) is [`physics`]; this module feeds it the desktop
+//! and moves the windows to match.
 
 use super::*;
+use aria_protocol::BodyMode;
 
 pub(crate) fn setup_window(app: &AppHandle) {
     // Note: this runs before the window is shown, when the winit window does not exist yet, so
@@ -61,60 +64,182 @@ pub(crate) fn sync_chrome(app: &AppHandle) {
     set_window_pos(app, x, y - grew);
 }
 
-/// Named desktop positions, plus perching on the active window.
+/// Walks to a named spot. With gravity she stays on what she stands on, so only the horizontal
+/// part of a location matters ("top_left" walks to the left like "bottom_left"), except `perch`,
+/// which jumps up onto the active window.
 pub(crate) fn walk_to(app: &AppHandle, location: &str, emotion: &str) {
     let loc = location.to_lowercase();
-    let (sx, sy, sw, sh) = crate::win32::work_area();
-    let (w, h) = window_size(app);
+    let (feet_x, feet_y) = feet(app);
+    let (sx, _, sw, _) = crate::win32::work_area_at(feet_x, feet_y - 10);
+    let (w, _) = window_size(app);
     let margin = 25;
-    let (_, cy) = app.borrow().pos;
-    let (tx, ty) = match loc.as_str() {
-        "left" => (sx + margin, cy),
-        "right" => (sx + sw - w - margin, cy),
-        "center" => (sx + (sw - w) / 2, sy + (sh - h) / 2),
-        "top_left" => (sx + margin, sy + margin),
-        "top_right" => (sx + sw - w - margin, sy + margin),
-        "bottom_left" => (sx + margin, sy + sh - h - margin),
-        "bottom_right" => (sx + sw - w - margin, sy + sh - h - margin),
-        "perch" => perch_point(app).unwrap_or((sx + sw - w - margin, sy + margin)),
-        _ => (
-            crate::util::rand_range(sx + margin, (sx + sw - w - margin).max(sx + margin)),
-            crate::util::rand_range(
-                (sy + sh - h - 180).max(sy + margin),
-                (sy + sh - h - margin).max(sy + margin),
-            ),
-        ),
+    let (left, right) = (sx + margin, (sx + sw - w - margin).max(sx + margin));
+    let mut perch = None;
+    let tx = match loc.as_str() {
+        "left" | "top_left" | "bottom_left" => left,
+        "right" | "top_right" | "bottom_right" => right,
+        "center" => sx + (sw - w) / 2,
+        "perch" => match perch_spot(app) {
+            Some((x, hwnd)) => {
+                perch = Some(hwnd);
+                x
+            }
+            None => right,
+        },
+        _ => crate::util::rand_range(left, right),
     };
-    let facing = tx > app.borrow().pos.0;
     {
         let mut a = app.borrow_mut();
-        a.target = Some((tx, ty));
+        a.target = Some((tx, a.pos.1));
+        a.perch_target = perch;
         a.post_walk_emotion = if emotion == "walking" {
             "idle".into()
         } else {
             emotion.to_string()
         };
-        a.facing_right = facing;
         a.user_placed = false;
     }
-    app.borrow().stage.set_state("walking", facing, true, false);
+    set_peeking(app, "none");
 }
 
-pub(crate) fn perch_point(app: &AppHandle) -> Option<(i32, i32)> {
+/// A spot on top of the active window to perch on: the window x for the mascot window, and the
+/// window to stand on. `None` when there is no suitable window or no headroom above it.
+pub(crate) fn perch_spot(app: &AppHandle) -> Option<(i32, isize)> {
     let win = crate::win32::active_window()?;
     let lower = win.title.to_lowercase();
     if lower.is_empty() || lower.contains("aria") || lower.contains("program manager") {
         return None;
     }
-    let (left, top, w, h) = crate::win32::window_rect(win.hwnd)?;
-    if w < 260 || h < 160 {
+    let (left, top, right) = crate::win32::window_top_edge(win.hwnd)?;
+    if right - left < 260 {
         return None;
     }
-    let (sx, sy, sw, sh) = crate::win32::work_area();
-    let (awn, ahn) = window_size(app);
-    let tx = (left + w - awn - 35).clamp(sx + 10, (sx + sw - awn - 10).max(sx + 10));
-    let ty = (top - (ahn as f32 * 0.42) as i32).clamp(sy + 5, (sy + sh - ahn - 10).max(sy + 5));
-    Some((tx, ty))
+    let (sx, sy, sw, _) = crate::win32::work_area_at((left + right) / 2, top);
+    let (_, _, _, avatar_h) = avatar_rect(app);
+    // A maximized window's top is the top of the screen: no room to stand there.
+    if top - avatar_h < sy {
+        return None;
+    }
+    let (w, _) = window_size(app);
+    // Near the window's right end, like sitting on the corner of a monitor.
+    let tx = (right - w - 35).clamp(sx + 10, (sx + sw - w - 10).max(sx + 10));
+    Some((tx, win.hwnd))
+}
+
+/// From the mascot window's top-left corner to the soles of her feet, in physical pixels.
+pub(crate) fn feet_offset(app: &AppHandle) -> (f32, f32) {
+    let (x, y) = app.borrow().pos;
+    let (ax, ay, aw, ah) = avatar_rect(app);
+    let ground = app.borrow().stage_geometry.map(|g| g.0).unwrap_or(0.0);
+    ((ax - x) as f32 + aw as f32 * 0.5, (ay - y + ah) as f32 - ground)
+}
+
+/// Where her feet are on the desktop, in physical pixels.
+pub(crate) fn feet(app: &AppHandle) -> (i32, i32) {
+    let (dx, dy) = feet_offset(app);
+    let (x, y) = app.borrow().pos;
+    (x + dx.round() as i32, y + dy.round() as i32)
+}
+
+/// One physics tick: gravity, walking, jumping and landing, then the windows follow her feet.
+pub(crate) fn step_body(app: &AppHandle, dt: f32) {
+    let Some((ground_offset, ppm)) = app.borrow().stage_geometry else {
+        return;
+    };
+    let (fdx, fdy) = feet_offset(app);
+    let pos = app.borrow().pos;
+    let actual = (pos.0 as f32 + fdx, pos.1 as f32 + fdy);
+
+    if app.borrow().dragging {
+        app.borrow_mut().body.hold(actual.0, actual.1, dt);
+        app.borrow().stage.set_body(BodyMode::Held);
+        return;
+    }
+    {
+        // Moved by something else (summon, the game dodge, a new framing): carry on from there.
+        let mut a = app.borrow_mut();
+        if (a.body.x - actual.0).abs() > 1.5 || (a.body.y - actual.1).abs() > 1.5 {
+            a.body.x = actual.0;
+            a.body.y = actual.1;
+        }
+    }
+
+    let (_, _, _, avatar_h) = avatar_rect(app);
+    let height = avatar_h as f32 - ground_offset;
+    let (sx, sy, sw, sh) =
+        crate::win32::work_area_at(actual.0 as i32, (actual.1 - height * 0.5) as i32);
+    let (perches, goal) = {
+        let a = app.borrow();
+        let mut perches = Vec::new();
+        let mut candidates = vec![a.body.perch, a.perch_target];
+        candidates.dedup();
+        for hwnd in candidates.into_iter().flatten() {
+            let Some((left, top, right)) = crate::win32::window_top_edge(hwnd) else { continue };
+            // Only while there is room above it for her whole body.
+            if top as f32 - height * 0.9 >= sy as f32 {
+                perches.push(physics::Surface {
+                    left: left as f32,
+                    right: right as f32,
+                    top: top as f32,
+                    perch: Some(hwnd),
+                });
+            }
+        }
+        let goal = a.target.map(|(tx, _)| physics::Goal {
+            x: tx as f32 + fdx,
+            perch: a.perch_target,
+        });
+        (perches, goal)
+    };
+    let env = physics::Env {
+        floor: (sy + sh) as f32,
+        perches: &perches,
+        walls: (sx as f32, (sx + sw) as f32),
+        ceiling: sy as f32 + height * 0.85,
+        ppm,
+    };
+    let pace = physics::Pace::for_persona(&config::current_persona());
+    let events = app.borrow_mut().body.step(&env, goal, pace, dt);
+
+    let (bx, by, mode) = {
+        let b = &app.borrow().body;
+        (b.x, b.y, b.mode)
+    };
+    let next = ((bx - fdx).round() as i32, (by - fdy).round() as i32);
+    if next != pos {
+        set_window_pos(app, next.0, next.1);
+    }
+    app.borrow().stage.set_body(mode);
+    if goal.is_some() && app.borrow().ui.get_status_line() != "Walking" {
+        app.borrow().ui.set_status_line("Walking".into());
+    }
+
+    for event in events {
+        match event {
+            physics::Event::Arrived => {
+                let emotion = {
+                    let mut a = app.borrow_mut();
+                    a.target = None;
+                    a.perch_target = None;
+                    a.stationary_since = Instant::now();
+                    a.last_emotion = a.post_walk_emotion.clone();
+                    a.last_emotion.clone()
+                };
+                app.borrow().ui.set_status_line(status_for(&emotion).into());
+            }
+            physics::Event::Landed { speed } => {
+                app.borrow_mut().stationary_since = Instant::now();
+                if speed > physics::HARD_LANDING {
+                    log::info!("hard landing at {speed:.1} m/s");
+                }
+                // Dropped near a screen edge: slide into the bezel peek.
+                if app.borrow().target.is_none() {
+                    check_edge_snap(app);
+                }
+            }
+            physics::Event::Fell => {}
+        }
+    }
 }
 
 pub(crate) fn window_size(app: &AppHandle) -> (i32, i32) {
@@ -167,9 +292,9 @@ pub(crate) fn reset_pose(app: &AppHandle) {
     {
         let mut a = app.borrow_mut();
         a.target = None;
+        a.perch_target = None;
         a.stationary_since = Instant::now();
     }
-    app.borrow().stage.set_state("idle", false, false, false);
     set_peeking(app, "none");
     say(
         app,
@@ -223,6 +348,7 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
         (a.ui.get_stage_h() * sf).round() as i32,
     );
     let bar_visible = a.ui.get_bar_visible();
+    let chrome = (a.ui.get_chrome_height() * sf).round() as i32;
     let key = (size.width as i32, size.height as i32, hole, bar_visible);
     if a.region_key == Some(key) {
         return;
@@ -231,14 +357,15 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
         return;
     };
     drop(a);
-    // While the bar is hidden its slot below the stage is empty; cut it out too, so the
-    // transparent strip does not swallow clicks meant for the desktop.
+    // Empty strips must not swallow clicks meant for the desktop: the padding under the stage
+    // always, and the bar's slot above her head while the bar is hidden.
     let below_stage = hole.1 + hole.3;
-    let bar_slot = (0, below_stage, size.width as i32, size.height as i32 - below_stage);
+    let under = (0, below_stage, size.width as i32, size.height as i32 - below_stage);
+    let bar_slot = (0, hole.1 - chrome, size.width as i32, chrome);
     let holes: &[(i32, i32, i32, i32)] = if bar_visible {
-        &[hole]
+        &[hole, under]
     } else {
-        &[hole, bar_slot]
+        &[hole, under, bar_slot]
     };
     crate::win32::set_region_with_holes(hwnd, size.width as i32, size.height as i32, holes);
     app.borrow_mut().region_key = Some(key);
@@ -246,8 +373,13 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
 
 /// The mascot window's Win32 handle.
 pub(crate) fn mascot_hwnd(ui: &MascotWindow) -> Option<isize> {
+    window_hwnd(ui.window())
+}
+
+/// A Slint window's Win32 handle, once it has a native window.
+pub(crate) fn window_hwnd(window: &slint::Window) -> Option<isize> {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    ui.window()
+    window
         .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
             _ => None,
@@ -255,13 +387,25 @@ pub(crate) fn mascot_hwnd(ui: &MascotWindow) -> Option<isize> {
         .flatten()
 }
 
+/// Keeps a Slint window off the taskbar: Aria lives in the tray.
+pub(crate) fn hide_from_taskbar(window: &slint::Window) {
+    if let Some(hwnd) = window_hwnd(window) {
+        crate::win32::hide_from_taskbar(hwnd);
+    }
+}
+
+/// Picked up: physics hands her to the cursor until she is let go.
 pub(crate) fn start_drag(app: &AppHandle) {
     let (pos, cursor) = (app.borrow().pos, crate::input::cursor_position());
-    let mut a = app.borrow_mut();
-    a.dragging = true;
-    a.drag_origin = Some((pos.0, pos.1, cursor.0, cursor.1));
-    a.target = None;
-    a.user_placed = true;
+    {
+        let mut a = app.borrow_mut();
+        a.dragging = true;
+        a.drag_origin = Some((pos.0, pos.1, cursor.0, cursor.1));
+        a.target = None;
+        a.perch_target = None;
+        a.user_placed = true;
+    }
+    set_peeking(app, "none");
 }
 
 pub(crate) fn update_drag(app: &AppHandle, cursor: (i32, i32)) {
@@ -273,64 +417,39 @@ pub(crate) fn update_drag(app: &AppHandle, cursor: (i32, i32)) {
     }
 }
 
+/// Let go: she keeps the cursor's momentum and physics takes over (fall, bounce, land).
 pub(crate) fn end_drag(app: &AppHandle) {
-    app.borrow_mut().dragging = false;
-    app.borrow_mut().drag_origin = None;
-    app.borrow_mut().stationary_since = Instant::now();
-    app.borrow().stage.set_drag_inertia(0.0, 0.0);
-    // Never leave the chat bar off-screen: at large scales the window is nearly as tall as the
-    // screen, and a small drag down pushed the bar under the taskbar, so it looked like it had
-    // vanished. She walks back into the work area instead.
-    let pos = app.borrow().pos;
-    let inside = clamp_to_work_area(app, pos);
-    if inside != pos {
-        app.borrow_mut().target = Some(inside);
-    }
-    check_edge_snap(app);
+    let ppm = app.borrow().stage_geometry.map(|g| g.1).unwrap_or(200.0);
+    let mut a = app.borrow_mut();
+    a.dragging = false;
+    a.drag_origin = None;
+    a.stationary_since = Instant::now();
+    a.body.release(ppm);
 }
 
-/// The closest window position that keeps the whole body usable: the chat bar and bubble inside
-/// the work area vertically (the bar wins when the window is taller than the screen), and at
-/// least half the width on screen so the bezel peek still works.
-pub(crate) fn clamp_to_work_area(app: &AppHandle, (x, y): (i32, i32)) -> (i32, i32) {
-    let (sx, sy, sw, sh) = crate::win32::work_area();
-    let (w, h) = window_size(app);
-    let y_max = sy + sh - h;
-    let cy = if y_max < sy { y_max } else { y.clamp(sy, y_max) };
-    let cx = x.clamp(sx - w / 2, sx + sw - w / 2);
-    (cx, cy)
-}
-
-/// Magnetic bezel snapping with the peeking lean.
+/// Magnetic bezel snapping with the peeking lean: landing near a screen edge, she shuffles
+/// half out of view and leans back in.
 pub(crate) fn check_edge_snap(app: &AppHandle) {
     if !config::get().edge_snapping_enabled {
         return;
     }
-    let (sx, sy, sw, sh) = crate::win32::work_area();
-    // Snap from where she is headed (e.g. back inside the work area), not where she was dropped.
-    let (x, y) = {
-        let a = app.borrow();
-        a.target.unwrap_or(a.pos)
-    };
-    let (w, h) = window_size(app);
+    let (feet_x, feet_y) = feet(app);
+    let (sx, _, sw, _) = crate::win32::work_area_at(feet_x, feet_y - 10);
+    let (x, y) = app.borrow().pos;
+    let (w, _) = window_size(app);
 
     const THRESHOLD: i32 = 55;
-    let mut target_x = x;
-    let mut target_y = y;
-    let mut side = "none";
-    if (x - sx).abs() <= THRESHOLD {
-        target_x = sx - (w as f32 * 0.12) as i32;
-        side = "left";
+    let (target_x, side) = if (x - sx).abs() <= THRESHOLD {
+        (sx - (w as f32 * 0.12) as i32, "left")
     } else if ((x + w) - (sx + sw)).abs() <= THRESHOLD {
-        target_x = sx + sw - (w as f32 * 0.88) as i32;
-        side = "right";
-    }
-    if ((y + h) - (sy + sh)).abs() <= THRESHOLD {
-        target_y = sy + sh - h;
-    }
-    if target_x != x || target_y != y {
-        app.borrow_mut().target = Some((target_x, target_y));
-        app.borrow_mut().post_walk_emotion = "idle".into();
+        (sx + sw - (w as f32 * 0.88) as i32, "right")
+    } else {
+        (x, "none")
+    };
+    if target_x != x {
+        let mut a = app.borrow_mut();
+        a.target = Some((target_x, y));
+        a.post_walk_emotion = a.last_emotion.clone();
     }
     set_peeking(app, side);
 }

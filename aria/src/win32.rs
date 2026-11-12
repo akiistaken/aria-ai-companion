@@ -388,6 +388,41 @@ pub fn work_area() -> (i32, i32, i32, i32) {
     )
 }
 
+/// The work area (screen minus taskbar) of the monitor nearest a point, as `(x, y, w, h)`.
+/// Aria stands on the taskbar of whichever monitor she is on.
+pub fn work_area_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            let r = info.rcWork;
+            return (r.left, r.top, r.right - r.left, r.bottom - r.top);
+        }
+    }
+    work_area()
+}
+
+/// A window's top edge as somewhere to stand, `(left, top, right)`, while the window is visible
+/// and not minimized.
+pub fn window_top_edge(hwnd: isize) -> Option<(i32, i32, i32)> {
+    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+    let handle = HWND(hwnd as *mut _);
+    unsafe {
+        if !IsWindowVisible(handle).as_bool() || IsIconic(handle).as_bool() {
+            return None;
+        }
+    }
+    let (left, top, width, _) = window_rect(hwnd)?;
+    Some((left, top, left + width))
+}
+
 pub struct Capture {
     pub rgb: Vec<u8>,
     pub width: u32,
@@ -634,6 +669,35 @@ pub fn ensure_topmost(hwnd: isize) -> bool {
         );
     }
     true
+}
+
+/// Takes a top-level window off the taskbar (and Alt+Tab) by making it a tool window.
+///
+/// The taskbar only re-reads the style when a window is shown, so a visible window is briefly
+/// hidden and re-shown without activation. A window that already has the style is left alone.
+pub fn hide_from_taskbar(hwnd: isize) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowLongW, SW_HIDE, SW_SHOWNOACTIVATE, WS_EX_APPWINDOW,
+    };
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let handle = HWND(hwnd as *mut _);
+        let style = GetWindowLongW(handle, GWL_EXSTYLE);
+        let updated = (style | WS_EX_TOOLWINDOW) & !(WS_EX_APPWINDOW.0 as i32);
+        if updated == style {
+            return;
+        }
+        let visible = IsWindowVisible(handle).as_bool();
+        if visible {
+            let _ = ShowWindow(handle, SW_HIDE);
+        }
+        SetWindowLongW(handle, GWL_EXSTYLE, updated);
+        if visible {
+            let _ = ShowWindow(handle, SW_SHOWNOACTIVATE);
+        }
+    }
 }
 
 /// Enables or disables click-through on the avatar window.

@@ -24,6 +24,7 @@ called out below.
 | 8 Split `app.rs` | **done** |
 | 9 Performance pass | **done** (measurements below) |
 | Build speed | **done** (measurements below) |
+| 10 Full-body animation and desktop physics | **done** (see below) |
 
 ---
 
@@ -243,6 +244,76 @@ Most of the renderer's memory is the Vulkan driver and wgpu; the model itself is
 
 ---
 
+## Phase 10 — Full-body animation and desktop physics
+
+**Done.** Replaces the Phase 5 port of the reference's `animate()` (`posing.rs` is gone): that
+code posed the upper body only, moved the legs only while walking, and hand-tuned Euler angles
+that bent fingers backward on the bundled rig.
+
+### Bugs this fixed
+
+- **Mouth open with no voice.** The renderer ran a procedural mouth flap whenever `talking` was
+  set, and the app set `talking` when a line *started* and never cleared it. Now the mouth moves
+  only from a fresh lip-sync envelope, and the app sends `talking = voice::is_speaking()` every
+  tick.
+- **Walking on the spot, or walking forever.** Walking was a flag; the window moved at a
+  constant 4.5 px per tick in any direction. Now the renderer *measures* its window's movement
+  and animates from that, and the app moves her with real acceleration and braking.
+- **Legs only animated while walking.** Both legs are solved with IK every frame now.
+
+### Renderer (`aria-avatar`)
+
+| Module | What |
+|---|---|
+| `rig.rs` | Typed `Bone` enum for all 55 VRM humanoid bones (fixed arrays instead of a string map). Forward kinematics in normalized space. **Missing optional bones** (chest, neck, shoulders, toes, fingers, eyes) fold their rotation into their children, and body `Metrics` (leg and arm lengths, hip width, eye/mouth/chin) are measured off the rest pose, so poses fit any proportions. |
+| `pose.rs` | Poses written in anatomical terms (arm hang, swing, elbow bend; finger curl and spread; leg swing, knee bend), authored once for the left side and mirrored. `reach()` places a hand with IK on a body landmark. |
+| `ik.rs` | Analytic two-bone IK that tolerates bent or A-pose rests. |
+| `emotes.rs` | 17 full-body emotions: idle, talking, happy, laugh, angry (foot stomps), annoyed (arms folded, toe tap), sad, cry (fists at the eyes, sobbing), thinking (hand to chin, finger tapping), surprised, shy, dizzy, sleepy (nodding off, yawns), dance (three figures over side taps), groove, sit (on the floor, hugging knees) and wave. Seven persona styles change the idle habit (hand on hip, hands behind, fists up and bouncing, …) and energy. |
+| `face.rs` | Expression blend per emotion, blinks (with the odd double blink), lip-sync; channels the model does not declare are never sent. Expression-driven gaze for models without eye bones. `ModelLoaded` now lists the model's expressions. |
+| `locomotion.rs` | `Motion` reads the window's travel. `Gait` plants each foot on a desktop pixel and advances the step cycle with **distance**, with stride growing with √speed, so cadence and stride scale together and a planted foot never slides. Falling and held poses. |
+| `animator.rs` | Layers emotion → locomotion (leg IK, hips riding the feet, arm swing) → cursor attention → follow-through springs (lean into acceleration, landing crouch, pendulum swing when carried). A hard landing (> 6.5 m/s) leaves her dizzy. The VRM root travels with the window's movement (scaled down), so hair and clothes spring bones react to walking, throwing and falling. |
+| `demo.rs` | Scripted preview runs that save contact sheets, no app needed: `.\scripts\avatar-shots.ps1` (see the script's header). |
+
+### App (`aria`)
+
+| What | How |
+|---|---|
+| Gravity, taskbar floor | `app/physics.rs` (pure, unit-tested). Feet-space simulation; gravity in m/s² scaled by the renderer's reported pixels per metre. The floor is the work-area bottom of whichever monitor she is on (`win32::work_area_at`). |
+| Throwing | Releasing a drag keeps the cursor's velocity (capped at 9 m/s); walls bounce, the top of the screen stops her. |
+| Walking | Accelerates, cruises at the persona's pace, jogs for long trips, brakes to stop exactly on the spot. |
+| Perching | Jumps up onto the active window (aimed ballistic jump), rides it when it moves, falls when it closes or minimizes, walks off its edge to get down. |
+| Thinking | "Thinking…" uses the thinking pose; without subtitles she still strikes it. |
+| Emotions fade | Reaction emotions return to idle when the bubble hides; sit, sleepy, dance and groove persist. |
+| LLM tags | The prompt and tag parser know all 17 emotions; a test keeps them in sync with `aria_protocol::EMOTIONS`. |
+| Chat bar | Moved **above her head** (bubble, bar, stage): with her feet on the taskbar, anything below the stage would be off screen. The empty padding under the stage is now cut out of the click region. |
+
+### Protocol
+
+`SetBody { mode: ground | air | held }`, `SetMood { persona }`, and the `Stage` event (feet offset
+in the window, pixels per metre). `SetState` lost `facing_right`/`moving`; `SetDragInertia` and
+`DragInertia` are gone (the renderer measures motion itself).
+
+### Verified
+
+- `cargo test --workspace`: 54 app, 52 avatar, 5 protocol tests. Highlights: a planted foot does
+  not slide while walking; feet alternate; every emotion × persona stays finite on a full rig and
+  on a 15-mandatory-bone rig; hands reach chin, eyes and hips; legs read correctly from the front
+  in the air and when held; a fall lands at √(2gh); a walk stops exactly on its target; a jump
+  lands on a window.
+- Contact sheets of every emotion, walking both ways, stopping, falling, landing and being held,
+  on the bundled model.
+- Live, on the user's own custom VRM: her soles are exactly on the taskbar (0 px off), the
+  mouth stays closed when silent, and the bar slot sits on screen above her head.
+
+### Notes
+
+- New installs default to `full` framing (head to toe). With `half` or `face` the legs are
+  cropped and the bottom of the avatar slot rests on the taskbar instead.
+- The renderer's logs go nowhere when the app spawns it; run it standalone to read them (the rig
+  line lists any optional bones a custom model lacks).
+
+---
+
 ## Bugs found and fixed along the way
 
 - **UI-thread panic on any reply over 160 characters**: `format_speech` split sentences with a
@@ -268,9 +339,10 @@ Most of the renderer's memory is the Vulkan driver and wgpu; the model itself is
 
 ## Verifying
 
-- `cargo test --workspace`: 45 app, 8 avatar, 4 protocol tests pass. New tests cover the
-  gesture gating, double-click poke, hit mask, premultiply, hearts, lighting clock and the
-  normalized idle pose.
+- `cargo test --workspace`: 54 app, 52 avatar, 5 protocol tests pass (see Phase 10 for what
+  the animation and physics tests cover).
+- Avatar contact sheets without the app: `.\scripts\avatar-shots.ps1` (pictures in
+  `target\shots`).
 - Standalone preview of the renderer, no app needed:
   `ARIA_AVATAR_EMOTION=happy ARIA_AVATAR_PROPS=halo,cat_ears ARIA_AVATAR_LIGHTING=sunset
   ARIA_AVATAR_FRAMING=full ARIA_AVATAR_SIZE=390x555 target\debug\aria-avatar.exe`
@@ -279,7 +351,9 @@ Most of the renderer's memory is the Vulkan driver and wgpu; the model itself is
 
 ## Not done / open
 
-- Some reference poses look odd on the bundled rig even with exact numbers (e.g. `annoyed`
-  holds the forearms out sideways). They are verbatim ports; retuning them is a design task.
-- Avatar `ModelLoaded` reports an empty expression list (`bevy_vrm1` keeps its registry private).
 - Clean builds are still ~30 min until the Defender exclusion is applied.
+- Dropping her onto a window does not catch her; only aimed jumps land on windows.
+- Physics follows the primary-monitor rules per monitor, but walking never crosses to another
+  monitor on its own (each monitor's edges are walls); dragging does.
+- Not exercised live: throwing and lip-sync during speech (injected input did not reach the app
+  from the agent's shell). Both are covered by unit tests.

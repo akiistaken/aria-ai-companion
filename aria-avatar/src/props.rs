@@ -18,7 +18,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::behaviors::AvatarState;
-use crate::rig::Rig;
+use crate::rig::{Bone, Rig};
 
 /// The root entity of one prop; its visibility follows `AvatarState::props`.
 #[derive(Component)]
@@ -170,8 +170,8 @@ impl Builder<'_, '_, '_> {
 }
 
 /// Spawns the normalized attachment frame for a bone, if the model has it.
-fn frame(b: &mut Builder, rig: &Rig, bones: &[&str]) -> Option<Entity> {
-    let (bone, transform) = bones.iter().find_map(|name| rig.attachment_frame(name))?;
+fn frame(b: &mut Builder, rig: &Rig, bones: &[Bone]) -> Option<Entity> {
+    let (bone, transform) = bones.iter().find_map(|bone| rig.attachment_frame(*bone))?;
     Some(b.group(bone, transform))
 }
 
@@ -188,7 +188,7 @@ pub fn build_props(
         materials,
     };
 
-    if let Some(head) = frame(&mut b, rig, &["head"]) {
+    if let Some(head) = frame(&mut b, rig, &[Bone::Head]) {
         // 1. Cat ears.
         let ears = b.prop(head, "cat_ears", Transform::IDENTITY);
         let outer = b.mat(material(0x1e293b, 0.4, 0.3, None));
@@ -255,7 +255,7 @@ pub fn build_props(
         }
     }
 
-    if let Some(chest) = frame(&mut b, rig, &["upperChest", "chest", "spine"]) {
+    if let Some(chest) = frame(&mut b, rig, &[Bone::UpperChest, Bone::Chest, Bone::Spine]) {
         // 8. Angel wings.
         let wings = b.prop(chest, "angel_wings", Transform::IDENTITY);
         let mut wing_mat = material(0xffffff, 0.25, 0.12, Some((0x38bdf8, 0.65)));
@@ -294,7 +294,7 @@ pub fn build_props(
         b.part(scabbard, Sphere::new(0.016).mesh().uv(10, 10), &gold, at(0.0, 0.495, 0.0));
     }
 
-    if let Some(hips) = frame(&mut b, rig, &["hips"]) {
+    if let Some(hips) = frame(&mut b, rig, &[Bone::Hips]) {
         // 10. Fox tail.
         let tail_root = b.prop(hips, "fox_tail", Transform::IDENTITY);
         let fur = b.mat(material(0xf8fafc, 0.8, 0.0, Some((0xf472b6, 0.25))));
@@ -306,7 +306,7 @@ pub fn build_props(
         b.part(tail, cone(0.036, 0.14, 12), &fur_tip, at_rot([0.0, -0.12, -0.27], [-2.1, 0.0, 0.0]));
     }
 
-    if let Some(right_hand) = frame(&mut b, rig, &["rightHand"]) {
+    if let Some(right_hand) = frame(&mut b, rig, &[Bone::RightHand]) {
         // 11. Coffee mug.
         let mug_root = b.prop(right_hand, "coffee_mug", Transform::IDENTITY);
         let mug_mat = b.mat(material(0xf8fafc, 0.2, 0.1, None));
@@ -328,7 +328,7 @@ pub fn build_props(
         b.part(pad, cylinder(0.007, 0.007, 0.008, 10), &btn, at(0.022, 0.006, 0.008));
     }
 
-    if let Some(left_hand) = frame(&mut b, rig, &["leftHand"]) {
+    if let Some(left_hand) = frame(&mut b, rig, &[Bone::LeftHand]) {
         // 13. Smartphone.
         let phone_root = b.prop(left_hand, "smartphone", Transform::IDENTITY);
         let chassis = b.mat(material(0x020617, 0.2, 0.9, None));
@@ -358,8 +358,8 @@ pub fn animate_props(
     mut parts: Query<(&PropAnim, &mut Transform)>,
 ) {
     let t = time.elapsed_secs();
-    let inertia_x = state.inertia_x;
-    let inertia_y = state.inertia_y;
+    // Wings and tails trail the way she is being carried.
+    let (inertia_x, inertia_y) = (state.drift.x, -state.drift.y);
     for (anim, mut transform) in parts.iter_mut() {
         match *anim {
             PropAnim::CatEar { left } => {

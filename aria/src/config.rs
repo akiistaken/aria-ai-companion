@@ -166,9 +166,11 @@ pub fn persona(key: &str) -> &'static Persona {
 pub const BASE_CAPABILITIES_PROMPT: &str = "\n\
     Keep your responses concise and conversational (1 to 2 sentences max) so they sound natural when spoken aloud.\n\n\
     EMOTION TAGS:\n\
-    Always start your final text response with ONE of these exact emotion tags:\n\
-    [EMOTION: idle], [EMOTION: talking], [EMOTION: annoyed], [EMOTION: happy], [EMOTION: walking], \
-    [EMOTION: dance], [EMOTION: sit], [EMOTION: groove]\n\n\
+    Always start your final text response with ONE of these exact emotion tags. Your whole body acts it \
+    out, so pick the one that matches how you feel:\n\
+    [EMOTION: idle], [EMOTION: talking], [EMOTION: happy], [EMOTION: laugh], [EMOTION: annoyed], \
+    [EMOTION: angry], [EMOTION: sad], [EMOTION: cry], [EMOTION: thinking], [EMOTION: surprised], \
+    [EMOTION: shy], [EMOTION: wave], [EMOTION: dance], [EMOTION: sit], [EMOTION: groove], [EMOTION: sleepy]\n\n\
     AUTONOMOUS MEMORY VAULT:\n\
     You have a persistent long-term Memory Vault across restarts. Now and then, decide what personal facts, habits, \
     preferences, favourite games, music tastes, skills, project notes or workflow details are worth keeping. Use \
@@ -246,7 +248,8 @@ impl Default for Settings {
             output_audio_device: String::new(),
             avatar_scale: 1.0,
             avatar_props: serde_json::Map::new(),
-            body_framing: "half".into(),
+            // Head to toe: she stands on the taskbar, so her feet belong in the picture.
+            body_framing: "full".into(),
             camera_zoom: 1.0,
             camera_y_offset: 0.0,
             custom_vrm_path: String::new(),
@@ -465,7 +468,7 @@ impl Settings {
             self.mic_mode = "click".into();
         }
         if !matches!(self.body_framing.as_str(), "full" | "half" | "face") {
-            self.body_framing = "half".into();
+            self.body_framing = "full".into();
         }
         if !matches!(
             self.stage_lighting.as_str(),

@@ -67,35 +67,16 @@ pub(crate) fn start_timers(app: &AppHandle) {
     });
 }
 
+/// The body tick: physics, where she looks, the cursor for the gestures, and voice.
 pub(crate) fn tick_motion(app: &AppHandle) {
-    let target = app.borrow().target;
-    if let Some((tx, ty)) = target {
-        if !app.borrow().dragging {
-            let (cx, cy) = app.borrow().pos;
-            let dx = tx - cx;
-            let dy = ty - cy;
-            let dist = ((dx * dx + dy * dy) as f64).sqrt();
-            let speed = 4.5;
-            if dist <= speed {
-                set_window_pos(app, tx, ty);
-                let (emotion, facing) = {
-                    let mut a = app.borrow_mut();
-                    a.target = None;
-                    (a.post_walk_emotion.clone(), a.facing_right)
-                };
-                app.borrow().stage.set_state(&emotion, facing, false, false);
-                app.borrow().ui.set_status_line(status_for(&emotion).into());
-            } else {
-                let step_x = cx + ((dx as f64 / dist) * speed).round() as i32;
-                let step_y = cy + ((dy as f64 / dist) * speed).round() as i32;
-                set_window_pos(app, step_x, step_y);
-                let facing = dx > 0;
-                app.borrow_mut().facing_right = facing;
-                app.borrow().stage.set_state("walking", facing, true, false);
-                app.borrow().ui.set_status_line("Walking".into());
-            }
-        }
-    }
+    let dt = {
+        let mut a = app.borrow_mut();
+        let now = Instant::now();
+        let dt = now.duration_since(a.last_motion).as_secs_f32().min(0.1);
+        a.last_motion = now;
+        dt
+    };
+    step_body(app, dt);
     let cursor = crate::input::cursor_position();
     let (win_pos, (w, h)) = (app.borrow().pos, window_size(app));
     let cx = win_pos.0 + w / 2;
@@ -113,14 +94,22 @@ pub(crate) fn tick_motion(app: &AppHandle) {
         let (left, right, middle) = crate::input::mouse_buttons();
         app.borrow().stage.set_pointer(x, y, left, right, middle);
     }
-    if crate::voice::is_speaking() {
-        let a = app.borrow();
-        a.stage
-            .set_state(&a.last_emotion, a.facing_right, a.target.is_some(), true);
-        let (aa, oh) = crate::voice::mouth_levels();
-        a.stage.set_mouth(aa, oh);
+    // `talking` follows the audio that is actually playing, so the mouth and the talking
+    // gestures can never run on after the voice stops (or without a voice at all).
+    let speaking = crate::voice::is_speaking();
+    let a = app.borrow();
+    let moving = a.target.is_some() || a.body.is_moving();
+    a.stage.set_state(shown_emotion(&a.last_emotion, moving), speaking);
+    let (aa, oh) = if speaking { crate::voice::mouth_levels() } else { (0.0, 0.0) };
+    a.stage.set_mouth(aa, oh);
+}
+
+/// The emotion to act out: sitting, dozing and dancing do not survive being on the move.
+fn shown_emotion(emotion: &str, moving: bool) -> &str {
+    if moving && matches!(emotion, "sit" | "sleepy" | "dance" | "walking") {
+        "idle"
     } else {
-        app.borrow().stage.set_mouth(0.0, 0.0);
+        emotion
     }
 }
 
@@ -200,17 +189,14 @@ pub(crate) fn apply_proactive(
     }
     if let Some(event) = event {
         if let Some(location) = &event.walk_location {
-            if location == "perch"
+            // App and music events hop up onto the active window, when there is one to stand on.
+            let perch = location == "perch"
                 || event.category.starts_with("app_")
-                || event.category.contains("music")
-            {
-                if let Some(point) = perch_point(app) {
-                    let mut a = app.borrow_mut();
-                    a.target = Some(point);
-                    a.post_walk_emotion = event.emotion.clone();
-                }
-            } else {
+                || event.category.contains("music");
+            if !perch {
                 walk_to(app, location, &event.emotion);
+            } else if perch_spot(app).is_some() {
+                walk_to(app, "perch", &event.emotion);
             }
         }
         say(app, &event.message, &event.emotion, vec![event.badge], true);

@@ -38,25 +38,47 @@ impl PeekSide {
     }
 }
 
+/// What is holding the avatar up. The app owns the desktop physics (gravity, the taskbar as the
+/// ground, throwing); the renderer picks the matching body animation and derives speed from how
+/// far its own window actually moved.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyMode {
+    /// Standing or walking on the ground (the taskbar, or a window she is perched on).
+    #[default]
+    Ground,
+    /// Falling, jumping or thrown.
+    Air,
+    /// Held by the cursor.
+    Held,
+}
+
+/// Every full-body emotion the renderer can act out, in the spelling used on the wire and in the
+/// `[EMOTION: …]` tags. Unknown names fall back to `idle` on the renderer side.
+pub const EMOTIONS: &[&str] = &[
+    "idle", "talking", "happy", "laugh", "angry", "annoyed", "sad", "cry", "thinking",
+    "surprised", "shy", "dizzy", "sleepy", "dance", "groove", "sit", "wave",
+];
+
 /// Commands sent from the app to the avatar renderer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Command {
     /// Load a VRM from an absolute filesystem path.
     LoadModel { path: String },
-    SetState {
-        emotion: String,
-        facing_right: bool,
-        moving: bool,
-        talking: bool,
-    },
+    /// What she feels (one of [`EMOTIONS`]) and whether her voice is playing. Walking is not part
+    /// of it: the renderer sees its own window move and animates from that.
+    SetState { emotion: String, talking: bool },
+    /// Whether she is on the ground, in the air or held (see [`BodyMode`]).
+    SetBody { mode: BodyMode },
+    /// The persona (`tsundere`, `genki`, …) that styles idle posture and how lively she moves.
+    SetMood { persona: String },
     /// Normalised `-1..1` against the avatar window centre.
     SetLook { x: f32, y: f32 },
     /// Lip-sync envelope, `0..1`.
     SetMouth { aa: f32, oh: f32 },
     SetPeeking { side: PeekSide },
     SetMusicVibe { active: bool, energy: f32 },
-    SetDragInertia { x: f32, y: f32 },
     TriggerHeadpat,
     SetProps { props: BTreeMap<String, bool> },
     /// `auto` | `day` | `dawn` | `sunset` | `night`.
@@ -117,10 +139,18 @@ pub enum Event {
         error: Option<String>,
         expressions: Vec<String>,
     },
+    /// How the model sits in the avatar window, so the app can stand her on the taskbar and move
+    /// her at a speed that matches her size. Sent whenever framing, size or model changes.
+    Stage {
+        /// Pixels from the bottom of the avatar window up to the soles of her feet (0 when the
+        /// framing crops the legs, so the window's bottom edge rests on the ground instead).
+        ground_offset: f32,
+        /// Window pixels per metre of model.
+        pixels_per_metre: f32,
+    },
     DragStart,
     DragMove,
     DragEnd,
-    DragInertia { x: f32, y: f32 },
     /// Double-click on the model.
     Poke,
     Shake,
@@ -157,15 +187,13 @@ mod tests {
     fn commands_round_trip_as_tagged_json() {
         let command = Command::SetState {
             emotion: "happy".into(),
-            facing_right: true,
-            moving: false,
             talking: true,
         };
         let line = command.to_line().expect("serialises");
         assert!(line.contains("\"kind\":\"set_state\""));
         let back: Command = serde_json::from_str(&line).expect("parses");
         match back {
-            Command::SetState { emotion, talking, .. } => {
+            Command::SetState { emotion, talking } => {
                 assert_eq!(emotion, "happy");
                 assert!(talking);
             }
@@ -192,6 +220,20 @@ mod tests {
             Command::SetPointer { pressed, right, middle, .. } => {
                 assert!(pressed);
                 assert!(!right && !middle);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn body_mode_and_stage_use_snake_case_json() {
+        let line = Command::SetBody { mode: BodyMode::Air }.to_line().expect("serialises");
+        assert_eq!(line, r#"{"kind":"set_body","data":{"mode":"air"}}"#);
+        let stage = Event::Stage { ground_offset: 23.5, pixels_per_metre: 190.0 };
+        match Event::from_line(&stage.to_line().expect("serialises")) {
+            Some(Event::Stage { ground_offset, pixels_per_metre }) => {
+                assert_eq!(ground_offset, 23.5);
+                assert_eq!(pixels_per_metre, 190.0);
             }
             other => panic!("wrong variant: {other:?}"),
         }
