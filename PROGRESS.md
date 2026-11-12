@@ -25,6 +25,7 @@ called out below.
 | 9 Performance pass | **done** (measurements below) |
 | Build speed | **done** (measurements below) |
 | 10 Full-body animation and desktop physics | **done** (see below) |
+| 11 Cleanup, AI SDK, voice input, music, dances, idle moments, Cua Driver | **done** (see below) |
 
 ---
 
@@ -314,6 +315,139 @@ in the window, pixels per metre). `SetState` lost `facing_right`/`moving`; `SetD
 
 ---
 
+## Phase 11 — Cleanup, AI SDK, voice input, music, dances, idle moments, Cua Driver
+
+### Workspace and build speed
+
+| Crate | What |
+|---|---|
+| `aria` | the app: logic and UI glue |
+| `aria-ui` | **new**: only the generated Slint code (`ui/*.slint` moved here) |
+| `aria-avatar` | the renderer |
+| `aria-protocol` | the socket messages |
+| `aria-build` | **new**: the rust-lld build-script helper both binaries used to copy |
+
+Shared dependency versions live in `[workspace.dependencies]`. Rust type-checks a whole crate on
+every edit, and the generated UI was most of `aria`; with it in its own crate an app edit no longer
+re-checks it.
+
+| Edit (dev, steady state) | Before | After |
+|---|---|---|
+| Touch one app `.rs` file | 9.2 s | **5.7 s** |
+| Touch one avatar `.rs` file | 6.5 s | 6.2 s |
+| Change a `.slint` file | ~11 s | 12.8 s |
+| No-op build | 1.8 s | 1.6 s |
+
+(The recorded 7.8 s in "Build speed" above was before Phase 10 grew the crate.)
+
+### App layout
+
+| Folder | Modules |
+|---|---|
+| `ai/` | `client` (async-openai), `prompt`, `brain` (conversation + tool loop), `tools`, `tasks` (one-shot jobs), `facts` |
+| `persona/` | the catalogue and flavour (`mod`), `mood`, `reactions` |
+| `voice/` | `tts`, `lipsync`, `mic`, `stt`, `listener` |
+| `desktop/` | `win32`, `input`, `cua`, `presence`, `media`, `beat`, `spotify`, `audio`, `system`, `launcher`, `com` |
+| `app/` | unchanged split (chat, body, physics, ticks, menus, avatar, studio) |
+
+Duplicates removed: three copies of `capitalize`/`title_case`, two of the `persona_line!` macro,
+two game lists (one each in `mood` and `proactive`, with different contents), two persona-key
+lists, two mic-capture paths, two copies of the lld helper, a hand-rolled base64 encoder (now the
+`base64` crate, already in the tree). Dead code removed: `offline.rs` (813 lines), the Ollama
+fallback, `analyze_dropped` and `Attachment` (never reachable), `config::set_api_key` (wrote
+process environment variables with `unsafe`), `handle_is_null`, `fact_texts`, and others. Zero
+compiler warnings, zero clippy warnings (`cargo clippy --workspace --all-targets`).
+
+### AI endpoint (`ai/`)
+
+- **async-openai** (0.43, `chat-completion` + `byot` + `rustls-no-provider`): typed requests,
+  lenient responses (DeepSeek-style finish reasons and `reasoning_content` would fail the strict
+  types). No second TLS backend: the client uses the `ring` provider `main` installs.
+- **One entry point** (`client::complete`) for every model call: endpoint, timeout (90 s),
+  classified errors, and a retry without any optional parameter the endpoint refuses
+  (`reasoning_effort`, `prompt_cache_key`, `response_format`), remembered for the session.
+- **Reasoning** setting in the Control Center (Engine → Reasoning): Auto / Off / Low / Medium /
+  High → `reasoning_effort`. Background jobs use Low unless the setting is Auto.
+- **Caching**: requests are laid out stable-first (persona prompt, tools, history) with the
+  per-turn context (mood, memory, time) last, and carry `prompt_cache_key`. Measured on the Sail
+  endpoint: 5,801 prompt tokens, **5,775 cached** on a repeat. Token and cache use is logged per call.
+- **Offline mode removed.** Every reply comes from the endpoint; without a key she says so. Touch
+  reactions stay scripted (they answer a gesture instantly). Proactive events now carry a
+  `situation`, and the AI writes her line for it; the scripted line is only the fallback.
+- Persona switch requests ("be genki") now switch the mood *and* let the model answer in it.
+- Empty replies (a reasoning model thinking through its budget) are retried once.
+
+### Voice input (the bug: mic mode never took effect)
+
+The hands-free listener was only started by flipping the wake-word toggle, so "Always-Open" did
+nothing, wake-word phrases were logged and dropped, push-to-talk had no key, and a new input
+device was ignored until restart. Now `voice::listener::apply` runs at startup and on every change
+of mic mode, wake word or input device; heard phrases are submitted; **push-to-talk** records while
+Ctrl+Shift+Space is held. The API-key field no longer saves (and wiped the conversation) on every
+keystroke.
+
+### Music (`desktop/media.rs`, `desktop/beat.rs`)
+
+- What is playing comes from **Windows system media sessions** (SMTC): Spotify, Wynk, and browser
+  tabs (YouTube, YouTube Music, SoundCloud, Wynk web) all publish one. Window titles name the site
+  for browser sessions and cover players without a session.
+- A **beat tracker** samples the music app's own session meter at 50 Hz (so her voice is never the
+  beat), estimates tempo by autocorrelation with a 120 BPM prior, and locks the phase with a comb
+  filter. Tested on synthetic kicks at 92–140 BPM.
+- `SetMusicVibe` carries `bpm` and `beat`; the renderer runs a **beat clock** that eases onto the
+  music's phase (never skipping). Loud music gets a dance, soft music a groove (with hysteresis).
+
+### Avatar
+
+- **Single click** on the model (after the double-click window passes) shows her last line again,
+  without re-speaking it. Double-click still pokes; a long press is neither.
+- **Smoother**: the app's motion tick is 60 Hz (was 30, so a walk visibly stepped), the renderer
+  boosts to 60 FPS while anything moves (was 45), an upper-body follow-through filter eases every
+  bone above the hips (legs untouched so feet never slide), and emotion blends use smootherstep
+  (overshoot only for big moves).
+- **Walk**: soft knees, a head nod and shoulder lift each step, wider arm swing, trailing wrists.
+- **Dances** (`emotes/dance.rs`): eight routines on the beat (side taps, idol heart, disco point,
+  shimmy, concert wave, bounce-and-clap, step kicks, spin and pose), one per 16-beat phrase, dealt
+  in shuffled decks so none repeats back to back; calm personas use the subtler four. Three groove
+  loops (nod, sway and snap, step-touch).
+- **Idle moments** (`emotes/moments.rs`, new emotions): stretch, look around, hum, twirl, fix hair,
+  clap. The app asks the AI (`ai::tasks::idle_event`) every 1–4 minutes of quiet, paced by persona,
+  what she does next given her mood and what the user is doing; usually silent. Toggle: Presence →
+  Idle moments.
+- `emotes.rs` (1,038 lines) became `emotes/{mod, moments, dance}.rs`.
+
+### Cua Driver (`desktop/cua.rs`)
+
+`cua-driver mcp` is started as a child (kill-on-close job) and spoken to over MCP JSON-RPC on stdio.
+- **Tools**: eight driver tools (`desktop_list_windows`, `desktop_get_window_state`,
+  `desktop_click`, `desktop_type_text`, `desktop_press_key`, `desktop_hotkey`, `desktop_scroll`,
+  `desktop_bring_to_front`) with compacted schemas. They replace the three legacy tools that guessed
+  pixels and stole focus; without the driver the legacy tools come back.
+- **Presence and games** (`desktop/presence.rs`): the front-most on-screen window comes from the
+  driver's z-ordered window list (Win32 fallback). Games are detected by install location (Steam,
+  Epic, Riot, GOG, Xbox, Battle.net, …), then by title/exe, then by covering the monitor (browsers
+  and players excluded). Fullscreen video with media playing is not "away".
+- Toggle: Presence → Desktop control → Cua Driver.
+
+### Verified
+
+- `cargo test --workspace`: **80 app, 62 avatar, 7 protocol** tests, plus three live tests
+  (`--ignored`) that passed against the Sail endpoint: a tool-calling turn (`get_now_playing_media`
+  read the real Spotify track through SMTC, reply in persona with tags parsed), an AI idle event, an
+  AI proactive line, and the cache numbers above.
+- Contact sheets of all eight dances over 32 s, every idle moment, and the new walk.
+- A 50 s live run: the always-open listener started on the saved setting, and the playing Spotify
+  track was detected.
+
+### Not done / open
+
+- Not exercised live: push-to-talk and the wake word with a real voice; the beat tracker on real
+  songs (only synthetic beats in tests); a driver tool call made by the model in a real turn.
+- `launcher.rs` (922 lines) and `win32.rs` were cleaned only where touched.
+- Focus mode still has no UI entry point (`TODO(wire-up)`).
+
+---
+
 ## Bugs found and fixed along the way
 
 - **UI-thread panic on any reply over 160 characters**: `format_speech` split sentences with a
@@ -339,8 +473,8 @@ in the window, pixels per metre). `SetState` lost `facing_right`/`moving`; `SetD
 
 ## Verifying
 
-- `cargo test --workspace`: 54 app, 52 avatar, 5 protocol tests pass (see Phase 10 for what
-  the animation and physics tests cover).
+- `cargo test --workspace`: 80 app, 62 avatar, 7 protocol tests pass (see Phases 10 and 11).
+- Live endpoint checks (need a key): `cargo test -p aria live_ -- --ignored --nocapture`.
 - Avatar contact sheets without the app: `.\scripts\avatar-shots.ps1` (pictures in
   `target\shots`).
 - Standalone preview of the renderer, no app needed:

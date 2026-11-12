@@ -128,7 +128,7 @@ pub fn update(details: &str, state: &str, persona: &str) {
         details.chars().take(120).collect()
     };
     let persona = if persona.trim().is_empty() {
-        crate::config::current_persona()
+        crate::persona::current_key()
     } else {
         persona.to_string()
     };

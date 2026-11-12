@@ -440,7 +440,7 @@ fn cmdline_for(exe: &str, args: &str) -> String {
 }
 
 fn visible_hwnds() -> std::collections::HashSet<isize> {
-    crate::win32::enum_windows(false)
+    crate::desktop::win32::enum_windows(false)
         .into_iter()
         .map(|w| w.hwnd)
         .collect()
@@ -480,7 +480,7 @@ fn wait_and_raise(
     pid: Option<u32>,
     title_hint: &str,
     timeout: f64,
-) -> (bool, Option<crate::win32::WindowInfo>) {
+) -> (bool, Option<crate::desktop::win32::WindowInfo>) {
     let deadline = Instant::now() + Duration::from_secs_f64(timeout);
     let hint = title_hint.trim().to_lowercase();
     while Instant::now() < deadline {
@@ -488,10 +488,10 @@ fn wait_and_raise(
         let mut wins = if exe_refs.is_empty() {
             Vec::new()
         } else {
-            crate::win32::find_windows(Some(&exe_refs), None, false, true)
+            crate::desktop::win32::find_windows(Some(&exe_refs), None, false, true)
         };
         if wins.is_empty() && !hint.is_empty() {
-            wins = crate::win32::find_windows(None, Some(&hint), false, true);
+            wins = crate::desktop::win32::find_windows(None, Some(&hint), false, true);
         }
         let fresh: Vec<_> = wins.iter().filter(|w| !before.contains(&w.hwnd)).cloned().collect();
         let candidate = if !fresh.is_empty() {
@@ -503,7 +503,7 @@ fn wait_and_raise(
         };
         if let Some(win) = candidate.into_iter().next() {
             std::thread::sleep(Duration::from_millis(200));
-            let raised = crate::win32::force_foreground(win.hwnd);
+            let raised = crate::desktop::win32::force_foreground(win.hwnd);
             return (raised, Some(win));
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -511,15 +511,15 @@ fn wait_and_raise(
     (false, None)
 }
 
-fn focus_existing(exes: &[String], hint: &str) -> Option<crate::win32::WindowInfo> {
+fn focus_existing(exes: &[String], hint: &str) -> Option<crate::desktop::win32::WindowInfo> {
     let exe_refs: Vec<&str> = exes.iter().map(String::as_str).collect();
-    let mut wins = crate::win32::find_windows(Some(&exe_refs), None, false, true);
+    let mut wins = crate::desktop::win32::find_windows(Some(&exe_refs), None, false, true);
     if wins.is_empty() && hint.len() >= 4 {
-        wins = crate::win32::find_windows(None, Some(&hint.to_lowercase()), false, true);
+        wins = crate::desktop::win32::find_windows(None, Some(&hint.to_lowercase()), false, true);
     }
     wins.retain(|w| w.title.to_lowercase() != "aria");
     let win = wins.into_iter().next()?;
-    crate::win32::force_foreground(win.hwnd);
+    crate::desktop::win32::force_foreground(win.hwnd);
     Some(win)
 }
 
@@ -855,7 +855,7 @@ pub fn force_open_url(url: &str) -> Value {
         });
     };
 
-    let exes = vec![Path::new(&exe)
+    let exes = [Path::new(&exe)
         .file_name()
         .map(|f| f.to_string_lossy().to_lowercase())
         .unwrap_or_default()];
@@ -868,9 +868,9 @@ pub fn force_open_url(url: &str) -> Value {
             let mut title = String::new();
             while Instant::now() < deadline {
                 let refs: Vec<&str> = exes.iter().map(String::as_str).collect();
-                let wins = crate::win32::find_windows(Some(&refs), None, false, true);
+                let wins = crate::desktop::win32::find_windows(Some(&refs), None, false, true);
                 if let Some(win) = wins.into_iter().next() {
-                    raised = crate::win32::force_foreground(win.hwnd);
+                    raised = crate::desktop::win32::force_foreground(win.hwnd);
                     title = win.title;
                     break;
                 }

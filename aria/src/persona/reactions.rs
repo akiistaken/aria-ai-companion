@@ -1,4 +1,4 @@
-//! Persona reaction lines: poke, shake, headpat.
+//! Instant touch reactions (poke, shake, headpat). These stay scripted on purpose: they answer a`n//! gesture in the same frame, which a round trip to the AI endpoint cannot.
 
 pub struct Reactions {
     pub key: &'static str,
@@ -133,7 +133,7 @@ fn lines(persona: &str, kind: &str) -> &'static [&'static str] {
 pub fn pick(persona: &str, kind: &str, chance: f32) -> String {
     let options = lines(persona, kind);
     let base = crate::util::pick_str(options);
-    crate::config::flavor_with(base, Some(persona), chance)
+    super::flavor_with(base, Some(persona), chance)
 }
 
 pub fn first_line(persona: &str, kind: &str) -> Option<String> {
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn every_persona_has_all_three_reaction_sets() {
-        for persona in crate::mood::PERSONAS {
+        for persona in super::super::KEYS {
             for kind in ["poke", "shake", "headpat"] {
                 assert!(
                     !lines(persona, kind).is_empty(),

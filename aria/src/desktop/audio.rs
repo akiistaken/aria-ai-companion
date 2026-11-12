@@ -1,25 +1,59 @@
 //! Desktop audio awareness: per-app session peak meters and speaker loopback capture.
 //!
-//! WASAPI requires COM to be initialised per thread, so every entry point wraps its work in
-//! [`with_com`] and never holds a COM object across the boundary.
+//! WASAPI requires COM on the calling thread ([`crate::desktop::com::ensure_mta`]). No COM object
+//! outlives the call that made it, except inside a [`MeterSet`], which stays on its own thread.
 
 use serde::Serialize;
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use wasapi::{
-    initialize_mta, AudioMeterInformation, Direction, SampleType, StreamMode, WaveFormat,
-};
+use wasapi::{AudioMeterInformation, Direction, SampleType, StreamMode, WaveFormat};
 
 const AUDIBLE_PEAK: f32 = 0.002;
 const TARGET_RATE: u32 = 16_000;
 
-static COM: OnceLock<Mutex<()>> = OnceLock::new();
-
 fn with_com<R>(f: impl FnOnce() -> R) -> R {
-    let lock = COM.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = initialize_mta();
+    crate::desktop::com::ensure_mta();
     f()
+}
+
+/// Peak meters of every playback session, kept open for fast repeated reads (the beat tracker
+/// samples them at 50 Hz). Not `Send`: create and use it on one thread.
+pub struct MeterSet {
+    meters: Vec<(u32, AudioMeterInformation)>,
+    opened: Instant,
+}
+
+impl MeterSet {
+    /// Opens the meters of the default output device's sessions.
+    pub fn open() -> Option<MeterSet> {
+        with_com(|| {
+            let device = wasapi::DeviceEnumerator::new().ok()?.get_default_device(Direction::Render).ok()?;
+            let sessions = device.get_iaudiosessionmanager().ok()?.get_audiosessionenumerator().ok()?;
+            let mut meters = Vec::new();
+            for index in 0..sessions.get_count().unwrap_or(0) {
+                let Ok(session) = sessions.get_session(index) else { continue };
+                let pid = session.get_process_id().unwrap_or(0);
+                if let Ok(meter) = session.get_audiometerinformation() {
+                    meters.push((pid, meter));
+                }
+            }
+            Some(MeterSet { meters, opened: Instant::now() })
+        })
+    }
+
+    /// Seconds since the sessions were enumerated; new players need a fresh set.
+    pub fn age(&self) -> Duration {
+        self.opened.elapsed()
+    }
+
+    /// The loudest peak right now among sessions whose pid passes `keep` (system sounds, pid 0,
+    /// are always skipped).
+    pub fn peak(&self, keep: impl Fn(u32) -> bool) -> f32 {
+        self.meters
+            .iter()
+            .filter(|(pid, _)| *pid != 0 && keep(*pid))
+            .map(|(_, meter)| meter.get_peak_value().unwrap_or(0.0))
+            .fold(0.0, f32::max)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,7 +113,7 @@ pub fn audio_activity(sample_ms: u64) -> AudioActivity {
             let name = if pid == 0 {
                 "System Sounds".to_string()
             } else {
-                let exe = crate::win32::process_name(pid);
+                let exe = crate::desktop::win32::process_name(pid);
                 if exe.is_empty() {
                     format!("pid {pid}")
                 } else {
@@ -303,7 +337,7 @@ fn to_16k_mono(samples: &[i16], channels: usize, rate: u32) -> Vec<i16> {
             let idx = (src as usize).min(mono.len() - 1);
             let next = (idx + 1).min(mono.len() - 1);
             let frac = (src - idx as f64) as f32;
-            (((mono[idx] + (mono[next] - mono[idx]) * frac)) * 32767.0) as i16
+            ((mono[idx] + (mono[next] - mono[idx]) * frac) * 32767.0) as i16
         })
         .collect()
 }

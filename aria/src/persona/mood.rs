@@ -8,15 +8,7 @@ use rand::Rng;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-pub static PERSONAS: &[&str] = &[
-    "tsundere",
-    "yandere",
-    "tomboy",
-    "bakadere",
-    "kuudere",
-    "genki",
-    "meganekko",
-];
+use super::KEYS as PERSONAS;
 
 const HALF_LIFE_SEC: f64 = 210.0;
 const MIN_DWELL_SEC: f64 = 60.0;
@@ -28,15 +20,6 @@ fn base_bias(key: &str) -> f64 {
         0.0
     }
 }
-
-const GAME_WORDS: &[&str] = &[
-    "valorant", "genshin", "elden ring", "cyberpunk", "minecraft", "counter-strike", "cs2",
-    "overwatch", "apex legends", "league of legends", "dota", "honkai", "wuthering", "fortnite",
-    "call of duty", "warzone", "rainbow six", "rocket league", "roblox", "helldivers",
-    "monster hunter", "destiny", "dark souls", "palworld", "grand theft auto", "gta", "osu!",
-    "team fortress", "terraria", "warframe", "pubg", "baldur's gate", "lethal company",
-    "street fighter", "tekken",
-];
 
 const WORK_WORDS: &[&str] = &[
     "visual studio", "vs code", "code -", "pycharm", "intellij", "antigravity", "powershell",
@@ -55,7 +38,7 @@ const ATTENTION_WORDS: &[&str] = &[
     "telegram", "whatsapp", "crunchyroll", "facebook", "messenger", "snapchat",
 ];
 
-const MUSIC_WORDS: &[&str] = &["spotify", "youtube music", "soundcloud", "apple music"];
+const MUSIC_WORDS: &[&str] = &["spotify", "youtube music", "soundcloud", "apple music", "wynk"];
 
 struct TextSignal {
     words: &'static [&'static str],
@@ -345,18 +328,13 @@ pub fn set_direct_mood(persona: &str, reason: &str) {
     }
 }
 
+/// The active mood and why, for the per-request context block.
 pub fn mood_note() -> String {
-    let st = engine().lock().unwrap_or_else(|e| e.into_inner());
-    let current = PERSONAS[st.current].to_uppercase();
-    let reason = st.reason.clone();
-    drop(st);
-    format!(
-        "AUTONOMOUS MOOD ENGINE: You have 100% agency over your feelings and mood. \
-         Your active mood right now is {current} ({reason}). \
-         Express this mood authentically through your banter, attitude, and reactions. \
-         If your feelings change during conversation, prefix your reply with \
-         `[MOOD: tsundere|yandere|tomboy]` to switch your mood."
-    )
+    let (current, reason) = {
+        let st = engine().lock().unwrap_or_else(|e| e.into_inner());
+        (PERSONAS[st.current].to_uppercase(), st.reason.clone())
+    };
+    format!("Your active mood right now is {current} ({reason}).")
 }
 
 pub fn note_user_text(text: &str) {
@@ -370,9 +348,9 @@ pub fn note_user_text(text: &str) {
                 let mut start = 0;
                 while let Some(pos) = low[start..].find(*w) {
                     let abs = start + pos;
-                    let before_ok = low[..abs].chars().next_back().map_or(true, |c| !c.is_ascii_lowercase());
+                    let before_ok = low[..abs].chars().next_back().is_none_or(|c| !c.is_ascii_lowercase());
                     let after = abs + w.len();
-                    let after_ok = low[after..].chars().next().map_or(true, |c| !c.is_ascii_lowercase());
+                    let after_ok = low[after..].chars().next().is_none_or(|c| !c.is_ascii_lowercase());
                     if before_ok && after_ok {
                         return true;
                     }
@@ -425,7 +403,7 @@ pub fn classify_window(title: &str) -> &'static str {
     if DOC_WORDS.iter().any(|d| low.contains(d)) {
         return "study";
     }
-    if GAME_WORDS.iter().any(|g| low.contains(g)) {
+    if crate::desktop::presence::game_in_title(&low).is_some() {
         return "gaming";
     }
     if MUSIC_WORDS.iter().any(|m| low.contains(m)) {

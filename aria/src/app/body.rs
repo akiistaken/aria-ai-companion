@@ -16,7 +16,7 @@ pub(crate) fn setup_window(app: &AppHandle) {
         w.set_transparent(true);
     });
     let scale = config::get().avatar_scale;
-    let (_, _, aw, ah) = crate::win32::work_area();
+    let (_, _, aw, ah) = crate::desktop::win32::work_area();
     let sf = app.borrow().ui.window().scale_factor();
     let width = STAGE_BASE_W * scale + 24.0;
     let height = STAGE_BASE_H * scale + 54.0;
@@ -70,7 +70,7 @@ pub(crate) fn sync_chrome(app: &AppHandle) {
 pub(crate) fn walk_to(app: &AppHandle, location: &str, emotion: &str) {
     let loc = location.to_lowercase();
     let (feet_x, feet_y) = feet(app);
-    let (sx, _, sw, _) = crate::win32::work_area_at(feet_x, feet_y - 10);
+    let (sx, _, sw, _) = crate::desktop::win32::work_area_at(feet_x, feet_y - 10);
     let (w, _) = window_size(app);
     let margin = 25;
     let (left, right) = (sx + margin, (sx + sw - w - margin).max(sx + margin));
@@ -105,16 +105,16 @@ pub(crate) fn walk_to(app: &AppHandle, location: &str, emotion: &str) {
 /// A spot on top of the active window to perch on: the window x for the mascot window, and the
 /// window to stand on. `None` when there is no suitable window or no headroom above it.
 pub(crate) fn perch_spot(app: &AppHandle) -> Option<(i32, isize)> {
-    let win = crate::win32::active_window()?;
+    let win = crate::desktop::win32::active_window()?;
     let lower = win.title.to_lowercase();
     if lower.is_empty() || lower.contains("aria") || lower.contains("program manager") {
         return None;
     }
-    let (left, top, right) = crate::win32::window_top_edge(win.hwnd)?;
+    let (left, top, right) = crate::desktop::win32::window_top_edge(win.hwnd)?;
     if right - left < 260 {
         return None;
     }
-    let (sx, sy, sw, _) = crate::win32::work_area_at((left + right) / 2, top);
+    let (sx, sy, sw, _) = crate::desktop::win32::work_area_at((left + right) / 2, top);
     let (_, _, _, avatar_h) = avatar_rect(app);
     // A maximized window's top is the top of the screen: no room to stand there.
     if top - avatar_h < sy {
@@ -167,14 +167,14 @@ pub(crate) fn step_body(app: &AppHandle, dt: f32) {
     let (_, _, _, avatar_h) = avatar_rect(app);
     let height = avatar_h as f32 - ground_offset;
     let (sx, sy, sw, sh) =
-        crate::win32::work_area_at(actual.0 as i32, (actual.1 - height * 0.5) as i32);
+        crate::desktop::win32::work_area_at(actual.0 as i32, (actual.1 - height * 0.5) as i32);
     let (perches, goal) = {
         let a = app.borrow();
         let mut perches = Vec::new();
         let mut candidates = vec![a.body.perch, a.perch_target];
         candidates.dedup();
         for hwnd in candidates.into_iter().flatten() {
-            let Some((left, top, right)) = crate::win32::window_top_edge(hwnd) else { continue };
+            let Some((left, top, right)) = crate::desktop::win32::window_top_edge(hwnd) else { continue };
             // Only while there is room above it for her whole body.
             if top as f32 - height * 0.9 >= sy as f32 {
                 perches.push(physics::Surface {
@@ -198,7 +198,7 @@ pub(crate) fn step_body(app: &AppHandle, dt: f32) {
         ceiling: sy as f32 + height * 0.85,
         ppm,
     };
-    let pace = physics::Pace::for_persona(&config::current_persona());
+    let pace = physics::Pace::for_persona(&crate::persona::current_key());
     let events = app.borrow_mut().body.step(&env, goal, pace, dt);
 
     let (bx, by, mode) = {
@@ -261,7 +261,7 @@ pub(crate) fn set_window_pos(app: &AppHandle, x: i32, y: i32) {
     let avatar = app.borrow().stage.hwnd() as isize;
     let (ax, ay, _, _) = avatar_rect(app);
     let moved = mascot != 0
-        && crate::win32::move_windows_together(&[(mascot, x, y), (avatar, ax, ay)]);
+        && crate::desktop::win32::move_windows_together(&[(mascot, x, y), (avatar, ax, ay)]);
     if !moved {
         app.borrow()
             .ui
@@ -298,7 +298,7 @@ pub(crate) fn reset_pose(app: &AppHandle) {
     set_peeking(app, "none");
     say(
         app,
-        &config::flav("Back to standing by. What do you need?"),
+        &crate::persona::flav("Back to standing by. What do you need?"),
         "idle",
         vec!["avatar reset to idle".into()],
         false,
@@ -315,7 +315,7 @@ pub(crate) fn layout_windows(app: &AppHandle) {
     stage.set_window_rect(x, y, w, h);
     // Re-seat the avatar on its slot as well: the stage slot can shift inside the mascot window
     // (the bubble grows, the scale changes) without the mascot window itself moving.
-    crate::win32::move_windows_together(&[(stage.hwnd() as isize, x, y)]);
+    crate::desktop::win32::move_windows_together(&[(stage.hwnd() as isize, x, y)]);
     cut_stage_hole(app);
 }
 
@@ -367,7 +367,7 @@ pub(crate) fn cut_stage_hole(app: &AppHandle) {
     } else {
         &[hole, under, bar_slot]
     };
-    crate::win32::set_region_with_holes(hwnd, size.width as i32, size.height as i32, holes);
+    crate::desktop::win32::set_region_with_holes(hwnd, size.width as i32, size.height as i32, holes);
     app.borrow_mut().region_key = Some(key);
 }
 
@@ -390,13 +390,13 @@ pub(crate) fn window_hwnd(window: &slint::Window) -> Option<isize> {
 /// Keeps a Slint window off the taskbar: Aria lives in the tray.
 pub(crate) fn hide_from_taskbar(window: &slint::Window) {
     if let Some(hwnd) = window_hwnd(window) {
-        crate::win32::hide_from_taskbar(hwnd);
+        crate::desktop::win32::hide_from_taskbar(hwnd);
     }
 }
 
 /// Picked up: physics hands her to the cursor until she is let go.
 pub(crate) fn start_drag(app: &AppHandle) {
-    let (pos, cursor) = (app.borrow().pos, crate::input::cursor_position());
+    let (pos, cursor) = (app.borrow().pos, crate::desktop::input::cursor_position());
     {
         let mut a = app.borrow_mut();
         a.dragging = true;
@@ -434,7 +434,7 @@ pub(crate) fn check_edge_snap(app: &AppHandle) {
         return;
     }
     let (feet_x, feet_y) = feet(app);
-    let (sx, _, sw, _) = crate::win32::work_area_at(feet_x, feet_y - 10);
+    let (sx, _, sw, _) = crate::desktop::win32::work_area_at(feet_x, feet_y - 10);
     let (x, y) = app.borrow().pos;
     let (w, _) = window_size(app);
 

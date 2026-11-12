@@ -1,0 +1,8 @@
+[package]
+name = "aria-build"
+version = "6.0.0"
+edition = "2021"
+publish = false
+description = "Build-script helpers shared by the Aria binaries"
+
+[dependencies]

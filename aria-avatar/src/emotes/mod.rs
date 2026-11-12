@@ -9,8 +9,17 @@
 //! The style is anime: big clear silhouettes, an anticipation or hop on entry, rhythmic secondary
 //! motion (a sob, a foot tap, a laugh shaking the shoulders), and the persona tints how lively the
 //! idle is.
+//!
+//! | Module | What |
+//! |---|---|
+//! | this one | the types, the building blocks, and the feelings (happy, sad, thinking, …) |
+//! | [`moments`] | idle moments she does on her own: stretch, look around, hum, twirl, fix her hair, clap |
+//! | [`dance`] | the dance library and the groove, on the music's beat |
 
-use std::f32::consts::{PI, TAU};
+mod dance;
+mod moments;
+
+use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
@@ -41,9 +50,24 @@ pub enum Emote {
     Groove,
     Sit,
     Wave,
+    Stretch,
+    LookAround,
+    Hum,
+    Twirl,
+    FixHair,
+    Clap,
 }
 
 impl Emote {
+    /// Every emote, in the order of `aria_protocol::EMOTIONS`.
+    #[cfg(test)]
+    pub const ALL: [Emote; 23] = [
+        Emote::Idle, Emote::Talking, Emote::Happy, Emote::Laugh, Emote::Angry, Emote::Annoyed,
+        Emote::Sad, Emote::Cry, Emote::Thinking, Emote::Surprised, Emote::Shy, Emote::Dizzy,
+        Emote::Sleepy, Emote::Dance, Emote::Groove, Emote::Sit, Emote::Wave, Emote::Stretch,
+        Emote::LookAround, Emote::Hum, Emote::Twirl, Emote::FixHair, Emote::Clap,
+    ];
+
     /// Parses the wire name. `walking` was an emotion in older builds; walking now comes from
     /// actually moving, so it and anything unknown mean "no particular emotion".
     pub fn parse(name: &str) -> Emote {
@@ -64,6 +88,12 @@ impl Emote {
             "groove" => Emote::Groove,
             "sit" => Emote::Sit,
             "wave" => Emote::Wave,
+            "stretch" => Emote::Stretch,
+            "look_around" | "look around" => Emote::LookAround,
+            "hum" | "humming" => Emote::Hum,
+            "twirl" | "spin" => Emote::Twirl,
+            "fix_hair" | "fix hair" => Emote::FixHair,
+            "clap" | "clapping" => Emote::Clap,
             _ => Emote::Idle,
         }
     }
@@ -72,7 +102,17 @@ impl Emote {
     pub fn is_lively(self) -> bool {
         matches!(
             self,
-            Emote::Dance | Emote::Dizzy | Emote::Laugh | Emote::Happy | Emote::Surprised | Emote::Wave | Emote::Angry
+            Emote::Dance
+                | Emote::Groove
+                | Emote::Dizzy
+                | Emote::Laugh
+                | Emote::Happy
+                | Emote::Surprised
+                | Emote::Wave
+                | Emote::Angry
+                | Emote::Twirl
+                | Emote::Clap
+                | Emote::Stretch
         )
     }
 }
@@ -239,6 +279,9 @@ pub struct Ctx<'a> {
     pub talk: f32,
     /// Loudness of the music she is grooving to, `0..1`.
     pub energy: f32,
+    /// Beats counted by the animator's beat clock: whole numbers fall on the music's beats (or on
+    /// her own tempo when nothing is playing). Dances and the groove run on this, not on `t`.
+    pub beat: f32,
 }
 
 impl Ctx<'_> {
@@ -268,6 +311,19 @@ fn sx(side: Side, x: f32, y: f32, z: f32) -> Vec3 {
     Vec3::new(x * side.sign(), y, z)
 }
 
+/// Brings both hands together in front of the chest (`apart` is the gap between the wrists),
+/// palms facing each other: a clap, a prayer, a heart shape when the fingers curl.
+fn hands_together(pose: &mut Pose, ctx: &Ctx, height: f32, forward: f32, apart: f32, shape: HandShape) {
+    let u = ctx.u();
+    let lm = Landmarks::of(ctx.rig, pose);
+    for side in Side::BOTH {
+        let target = chest(&lm, sx(side, (0.012 + apart * 0.5) * u, height * u, forward * u));
+        let hand = hand_aim(side, sx(side, -0.25, 0.95, 0.15), sx(side, -1.0, 0.0, 0.0));
+        pose.reach(ctx.rig, side, target, sx(side, 0.75, -0.6, -0.2), Some(hand));
+        pose.fingers(side, shape);
+    }
+}
+
 /// Evaluates an emotion.
 pub fn act(emote: Emote, ctx: &Ctx) -> Act {
     match emote {
@@ -284,10 +340,16 @@ pub fn act(emote: Emote, ctx: &Ctx) -> Act {
         Emote::Shy => shy(ctx),
         Emote::Dizzy => dizzy(ctx),
         Emote::Sleepy => sleepy(ctx),
-        Emote::Dance => dance(ctx),
-        Emote::Groove => groove(ctx),
+        Emote::Dance => dance::dance(ctx),
+        Emote::Groove => dance::groove(ctx),
         Emote::Sit => sit(ctx),
         Emote::Wave => wave(ctx),
+        Emote::Stretch => moments::stretch(ctx),
+        Emote::LookAround => moments::look_around(ctx),
+        Emote::Hum => moments::hum(ctx),
+        Emote::Twirl => moments::twirl(ctx),
+        Emote::FixHair => moments::fix_hair(ctx),
+        Emote::Clap => moments::clap(ctx),
     }
 }
 
@@ -779,96 +841,6 @@ fn sleepy(ctx: &Ctx) -> Act {
     act
 }
 
-fn dance(ctx: &Ctx) -> Act {
-    let mut act = neutral(ctx);
-    let (t, e, u) = (ctx.t, ctx.e, ctx.u());
-    // Beats, at about 126 bpm.
-    let b = t * 2.1;
-    let down = 0.5 - 0.5 * (TAU * b).cos();
-    // Side taps: the right foot goes out and back over two beats, then the left.
-    let two = fract(b / 2.0);
-    let (right_out, left_out) = (bump(two * 2.0), bump(two * 2.0 - 1.0));
-    let hop = bump(fract(two * 4.0));
-    let sway = left_out - right_out;
-    act.feet[Side::Right.index()].offset.x = -0.16 * u * right_out;
-    act.feet[Side::Right.index()].lift = if two < 0.5 { 0.035 * u * hop } else { 0.0 };
-    act.feet[Side::Left.index()].offset.x = 0.16 * u * left_out;
-    act.feet[Side::Left.index()].lift = if two >= 0.5 { 0.035 * u * hop } else { 0.0 };
-    // The hips swing away from the tapping foot and the shoulders answer.
-    act.pose.hips.x -= 0.035 * u * sway;
-    act.pose.pelvis(0.0, 0.1 * (PI * b).sin(), -0.1 * sway);
-    act.pose.spine(-0.02, -0.14 * (PI * b).sin(), 0.07 * sway);
-    act.pose.head(0.06 * (TAU * b).cos(), 0.0, 0.08 * (PI * b).sin());
-    act.crouch = 0.035 * u * down;
-
-    // Three arm figures, eight beats each, cross-faded.
-    let section = fract(b / 24.0) * 3.0;
-    let weights = [0usize, 1, 2].map(|i| {
-        let d = (section - i as f32 - 0.5).rem_euclid(3.0) - 1.5;
-        1.0 - smoothstep(0.42, 0.58, d.abs())
-    });
-    let mut arms = Pose::default();
-    let mut figure = Pose::default();
-    for (index, weight) in weights.into_iter().enumerate() {
-        if weight <= 0.0 {
-            continue;
-        }
-        for side in Side::BOTH {
-            let alt = (PI * b + if side == Side::Left { 0.0 } else { PI }).sin();
-            let arm = match index {
-                // Pumping the fists overhead in turn.
-                0 => Arm { down: -0.45 - 0.35 * alt, swing: 0.0, yaw: 0.35, twist: -1.35, bend: 1.3 - 0.5 * alt, pronate: 0.0 },
-                // Both arms up, waving side to side with the hips.
-                1 => Arm { down: -1.0 + 0.22 * sway * side.sign(), swing: 0.0, yaw: 0.15, twist: -1.2, bend: 0.45, pronate: 0.0 },
-                // Rolling the forearms in front of the chest.
-                _ => Arm { down: 0.75, swing: 0.3, yaw: 0.3, twist: 0.5 + 0.35 * alt, bend: 1.9 + 0.25 * alt, pronate: 0.0 },
-            };
-            figure.arm(side, arm);
-            figure.fingers(side, if index == 1 { HandShape::OPEN } else { HandShape::LOOSE_FIST });
-            figure.wrist(side, 0.0, 0.0, 0.0);
-        }
-        arms.blend(&figure, weight / weights[..=index].iter().sum::<f32>().max(1e-3));
-    }
-    for side in Side::BOTH {
-        act.pose.blend_bones(&arms, arm_bones(side), 1.0);
-    }
-    // Twirls once into the dance.
-    let turn = smoothstep(0.0, 0.9, e);
-    act.spin = TAU * turn;
-    act.face = Face { happy: 0.9, ..default() };
-    act.attention = 0.3;
-    act.walk_arms = 0.4;
-    act
-}
-
-fn groove(ctx: &Ctx) -> Act {
-    let mut act = idle(ctx);
-    let (t, u) = (ctx.t, ctx.u());
-    let en = ctx.energy.clamp(0.35, 1.0) * ctx.style.energy.clamp(0.8, 1.2);
-    let b = t * 1.9;
-    let down = 0.5 - 0.5 * (TAU * b).cos();
-    let side_to_side = (PI * b).sin();
-    act.pose.pelvis(0.0, 0.0, 0.06 * en * side_to_side);
-    act.pose.spine(0.0, 0.05 * en * side_to_side, -0.04 * en * side_to_side);
-    act.pose.head(0.08 * en * down, 0.0, 0.05 * en * side_to_side);
-    let mut arms = Pose::default();
-    for side in Side::BOTH {
-        let bob = (TAU * b + side.sign()).sin();
-        arms.arm(
-            side,
-            Arm { down: 1.2, swing: 0.22, yaw: 0.0, twist: 0.1, bend: 1.3 + 0.15 * bob * en, pronate: 0.0 },
-        );
-        arms.wrist(side, 0.12 * bob, 0.0, 0.0);
-        arms.fingers(side, HandShape::LOOSE_FIST);
-        act.pose.blend_bones(&arms, arm_bones(side), 1.0);
-    }
-    act.feet[Side::Right.index()].heel = 0.28 * en * down;
-    act.crouch = 0.02 * u * en * down;
-    act.face = Face { relaxed: 0.4, happy: 0.3, ..default() };
-    act.walk_arms = 0.5;
-    act
-}
-
 /// Pelvis roll-back of the floor sit, shared with [`sit_layout`].
 const SIT_PELVIS_TILT: f32 = -0.32;
 
@@ -987,21 +959,18 @@ pub fn arm_bones(side: Side) -> impl Iterator<Item = Bone> {
 mod tests {
     use super::*;
 
-    const ALL: [Emote; 17] = [
-        Emote::Idle, Emote::Talking, Emote::Happy, Emote::Laugh, Emote::Angry, Emote::Annoyed,
-        Emote::Sad, Emote::Cry, Emote::Thinking, Emote::Surprised, Emote::Shy, Emote::Dizzy,
-        Emote::Sleepy, Emote::Dance, Emote::Groove, Emote::Sit, Emote::Wave,
-    ];
+    const ALL: [Emote; 23] = Emote::ALL;
 
-    fn ctx(rig: &Rig, t: f32, style: Style) -> Ctx<'_> {
-        Ctx { rig, t, e: t, style, talk: 0.5, energy: 0.6 }
+    pub(super) fn ctx(rig: &Rig, t: f32, style: Style) -> Ctx<'_> {
+        Ctx { rig, t, e: t, style, talk: 0.5, energy: 0.6, beat: t * 2.0 }
     }
 
     #[test]
     fn every_wire_emotion_parses_to_its_own_emote() {
         let mut seen = Vec::new();
-        for name in aria_protocol::EMOTIONS {
+        for (name, expected) in aria_protocol::EMOTIONS.iter().zip(Emote::ALL) {
             let emote = Emote::parse(name);
+            assert_eq!(emote, expected, "{name} is out of order in Emote::ALL");
             assert!(!seen.contains(&emote), "{name} parsed to an emote another name already uses");
             seen.push(emote);
         }

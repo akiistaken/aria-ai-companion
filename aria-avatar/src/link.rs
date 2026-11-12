@@ -279,9 +279,13 @@ pub fn pump_link(
                 state.mouth_age = 0.0;
             }
             Command::SetPeeking { side } => state.peeking = side,
-            Command::SetMusicVibe { active, energy } => {
+            Command::SetMusicVibe { active, energy, bpm, beat } => {
                 state.music_active = active;
                 state.music_energy = energy;
+                // A measured beat re-syncs her beat clock; no tempo means "keep your own".
+                if active && bpm > 0.0 {
+                    state.music_sync = Some(crate::animator::BeatSync { bpm, phase: beat });
+                }
             }
             Command::TriggerHeadpat => {
                 state.headpat_active = 1.0;

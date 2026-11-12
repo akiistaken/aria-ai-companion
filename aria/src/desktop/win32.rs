@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
@@ -26,6 +26,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const _GWL_EXSTYLE_VALUE: i32 = -20;
 const WS_EX_TOOLWINDOW: i32 = 0x0000_0080;
 
+/// (x, y, width, height) in physical screen pixels.
+pub type Rect = (i32, i32, i32, i32);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WindowInfo {
     pub hwnd: isize,
@@ -42,39 +45,25 @@ fn proc_cache() -> &'static Mutex<HashMap<u32, String>> {
     PROC_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Lower-cased executable name for a pid, or "" when inaccessible.
-pub fn process_name(pid: u32) -> String {
+/// Lower-cased full image path for a pid, or "" when inaccessible. Cached per pid.
+pub fn process_path(pid: u32) -> String {
     if pid == 0 {
         return String::new();
     }
-    if let Some(name) = proc_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&pid)
-    {
-        return name.clone();
+    if let Some(path) = proc_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&pid) {
+        return path.clone();
     }
-    let name = unsafe {
+    // SAFETY: the handle is checked, used for one query and closed.
+    let path = unsafe {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
             .ok()
             .and_then(|handle| {
                 let mut buf = [0u16; 1024];
                 let mut size = buf.len() as u32;
-                let ok = QueryFullProcessImageNameW(
-                    handle,
-                    PROCESS_NAME_WIN32,
-                    PWSTR(buf.as_mut_ptr()),
-                    &mut size,
-                )
-                .is_ok();
+                let ok =
+                    QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut size).is_ok();
                 let _ = CloseHandle(handle);
-                if !ok {
-                    return None;
-                }
-                let full = String::from_utf16_lossy(&buf[..size as usize]);
-                full.rsplit(['\\', '/'])
-                    .next()
-                    .map(|s| s.to_lowercase())
+                ok.then(|| String::from_utf16_lossy(&buf[..size as usize]).to_lowercase())
             })
             .unwrap_or_default()
     };
@@ -82,8 +71,13 @@ pub fn process_name(pid: u32) -> String {
     if cache.len() > 512 {
         cache.clear();
     }
-    cache.insert(pid, name.clone());
-    name
+    cache.insert(pid, path.clone());
+    path
+}
+
+/// Lower-cased executable name for a pid, or "" when inaccessible.
+pub fn process_name(pid: u32) -> String {
+    process_path(pid).rsplit(['\\', '/']).next().unwrap_or_default().to_string()
 }
 
 pub fn enum_windows(include_hidden: bool) -> Vec<WindowInfo> {
@@ -291,7 +285,7 @@ pub fn show_window(hwnd: isize, action: &str) -> bool {
     }
 }
 
-pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+pub fn window_rect(hwnd: isize) -> Option<Rect> {
     #[repr(C)]
     struct Rect {
         left: i32,
@@ -348,7 +342,7 @@ pub fn idle_seconds() -> f64 {
     f64::from(millis) / 1000.0
 }
 
-pub fn screen_size() -> (i32, i32, i32, i32) {
+pub fn screen_size() -> Rect {
     #[link(name = "user32")]
     extern "system" {
         fn GetSystemMetrics(index: i32) -> i32;
@@ -358,7 +352,7 @@ pub fn screen_size() -> (i32, i32, i32, i32) {
     unsafe { (0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
-pub fn work_area() -> (i32, i32, i32, i32) {
+pub fn work_area() -> Rect {
     #[repr(C)]
     struct Rect {
         left: i32,
@@ -390,23 +384,26 @@ pub fn work_area() -> (i32, i32, i32, i32) {
 
 /// The work area (screen minus taskbar) of the monitor nearest a point, as `(x, y, w, h)`.
 /// Aria stands on the taskbar of whichever monitor she is on.
-pub fn work_area_at(x: i32, y: i32) -> (i32, i32, i32, i32) {
-    use windows::Win32::Foundation::POINT;
-    use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    };
+pub fn work_area_at(x: i32, y: i32) -> Rect {
+    monitor_info_at(x, y).map(|(_, work)| work).unwrap_or_else(work_area)
+}
+
+/// The whole monitor (taskbar included) nearest to a point.
+pub fn monitor_rect_at(x: i32, y: i32) -> Rect {
+    monitor_info_at(x, y).map(|(monitor, _)| monitor).unwrap_or_else(screen_size)
+}
+
+/// `(monitor, work area)` rectangles of the monitor nearest to a point.
+fn monitor_info_at(x: i32, y: i32) -> Option<(Rect, Rect)> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let rect = |r: RECT| (r.left, r.top, r.right - r.left, r.bottom - r.top);
+    // SAFETY: `info` is a correctly sized MONITORINFO.
     unsafe {
         let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if GetMonitorInfoW(monitor, &mut info).as_bool() {
-            let r = info.rcWork;
-            return (r.left, r.top, r.right - r.left, r.bottom - r.top);
-        }
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetMonitorInfoW(monitor, &mut info).as_bool().then(|| (rect(info.rcMonitor), rect(info.rcWork)))
     }
-    work_area()
 }
 
 /// A window's top edge as somewhere to stand, `(left, top, right)`, while the window is visible
@@ -527,33 +524,7 @@ pub fn capture_screen_jpeg_b64(max_width: u32) -> Option<String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
     encoder.encode_image(&img).ok()?;
-    Some(base64_encode(&buf.into_inner()))
-}
-
-pub fn base64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(TABLE[(n >> 18 & 63) as usize] as char);
-        out.push(TABLE[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6 & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    Some(crate::util::base64(&buf.into_inner()))
 }
 
 /// Asks Windows to trim unused physical RAM from the working set.
@@ -562,12 +533,6 @@ pub fn trim_working_set() -> bool {
         let process = GetCurrentProcess();
         SetProcessWorkingSetSize(process, usize::MAX, usize::MAX).is_ok()
     }
-}
-
-// TODO(wire-up): kept as a small Win32 predicate for future HWND checks.
-#[allow(dead_code)]
-pub fn handle_is_null(h: HANDLE) -> bool {
-    h.0.is_null()
 }
 
 /// True while the workstation is locked (the lock screen owns the foreground).
@@ -583,7 +548,7 @@ pub fn session_locked() -> bool {
 
 /// Gives a window a hit/paint region of its full rect minus some holes `(x, y, w, h)`, in window
 /// pixels. Clicks inside a hole fall through to whatever is underneath.
-pub fn set_region_with_holes(hwnd: isize, width: i32, height: i32, holes: &[(i32, i32, i32, i32)]) {
+pub fn set_region_with_holes(hwnd: isize, width: i32, height: i32, holes: &[Rect]) {
     use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF};
     if hwnd == 0 || width <= 0 || height <= 0 {
         return;
@@ -783,14 +748,6 @@ pub fn put_in_kill_on_close_job(child: &mut std::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn base64_matches_known_vector() {
-        assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"Ma"), "TWE=");
-        assert_eq!(base64_encode(b"M"), "TQ==");
-        assert_eq!(base64_encode(b""), "");
-    }
 
     #[test]
     fn enumeration_returns_window_handles() {

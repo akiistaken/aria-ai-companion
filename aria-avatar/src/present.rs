@@ -89,7 +89,7 @@ impl HitMask {
         self.width = width;
         self.height = height;
         self.alpha.clear();
-        self.alpha.extend(rgba.chunks_exact(4).map(|px| px[3]));
+        self.alpha.extend(rgba.as_chunks::<4>().0.iter().map(|px| px[3]));
     }
 }
 
@@ -143,7 +143,7 @@ pub fn present_latest(
     };
     if !presenter.logged {
         presenter.logged = true;
-        let covered = rgba.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let covered = rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 0).count();
         log::info!(
             "first frame {width}x{height} {:?}, {covered} of {} pixels covered",
             image.texture_descriptor.format,

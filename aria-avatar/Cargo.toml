@@ -35,11 +35,11 @@ bevy = { version = "0.20", default-features = false, features = [
   "default_platform",
 ] }
 bevy_vrm1 = { version = "0.11", features = ["log"] }
-aria-protocol = { path = "../aria-protocol" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-log = "0.4"
-windows = { version = "0.62", features = [
+aria-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+windows = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
@@ -49,3 +49,6 @@ windows = { version = "0.62", features = [
   # workspace builds compile `windows` once either way.
   "Win32_System_Time",
 ] }
+
+[build-dependencies]
+aria-build = { workspace = true }

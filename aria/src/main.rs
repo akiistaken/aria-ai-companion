@@ -8,27 +8,20 @@
 // inherited stderr still mirrors them in debug builds.
 #![windows_subsystem = "windows"]
 
+mod ai;
 mod app;
 mod avatar_link;
-mod audio;
-mod brain;
 mod config;
+mod desktop;
 mod discord;
-mod input;
-mod launcher;
 mod logger;
 mod memory;
-mod mood;
-mod offline;
+mod persona;
 mod proactive;
-mod reactions;
-mod sysinfo;
-mod tools;
 mod tray;
 mod util;
 mod voice;
 mod wardrobe;
-mod win32;
 
 use slint::ComponentHandle;
 
@@ -149,7 +142,7 @@ fn setup_native_window(window_title: &str) {
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         // She lives in the tray, not on the taskbar.
-        crate::win32::hide_from_taskbar(hwnd.0 as isize);
+        crate::desktop::win32::hide_from_taskbar(hwnd.0 as isize);
         log::info!("native window styled: frameless + transparent, off the taskbar");
     }
 }

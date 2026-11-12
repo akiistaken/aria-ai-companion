@@ -18,7 +18,7 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
                 app.borrow().ui.set_vision(next);
                 say(
                     &app,
-                    &config::flav(if next {
+                    &crate::persona::flav(if next {
                         "Continuous screen vision is on — I can see your screen while we talk."
                     } else {
                         "I'll only look at your screen when you ask me to."
@@ -48,7 +48,7 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
                 }
                 say(
                     &app,
-                    &config::flav(if next {
+                    &crate::persona::flav(if next {
                         "My voice is back on."
                     } else {
                         "You muted my voice — I'll use text for now."
@@ -101,7 +101,7 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
             ui.on_open_menu(move || {
                 // Open just above the bar (which sits above her head), so the menu never covers
                 // the bar or hides behind it.
-                let cursor = crate::input::cursor_position();
+                let cursor = crate::desktop::input::cursor_position();
                 let (_, y) = app.borrow().pos;
                 let bar_top = {
                     let a = app.borrow();
@@ -121,14 +121,22 @@ pub(crate) fn wire_callbacks(app: &AppHandle) {
     }
 }
 
-/// Global hotkeys: Alt+Space summons, Ctrl+Shift+M toggles the mic, Ctrl+Shift+C opens the studio.
+#[derive(Clone, Copy)]
+enum Hotkey {
+    Summon,
+    Mic,
+    Studio,
+    PushToTalk,
+}
+
+/// Global hotkeys: Alt+Space summons, Ctrl+Shift+M toggles the mic, Ctrl+Shift+C opens the
+/// studio, and Ctrl+Shift+Space is push-to-talk (records while held, in that mic mode).
 pub(crate) fn install_hotkeys() {
     std::thread::spawn(move || {
         use global_hotkey::hotkey::HotKey;
-
         use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-
         use std::str::FromStr;
+
         let manager = match GlobalHotKeyManager::new() {
             Ok(m) => m,
             Err(e) => {
@@ -136,40 +144,35 @@ pub(crate) fn install_hotkeys() {
                 return;
             }
         };
-        let mut registered = [0u32; 3];
-        for (index, combo) in ["Alt+Space", "Control+Shift+M", "Control+Shift+C"]
-            .iter()
-            .enumerate()
-        {
+        let combos = [
+            ("Alt+Space", Hotkey::Summon),
+            ("Control+Shift+M", Hotkey::Mic),
+            ("Control+Shift+C", Hotkey::Studio),
+            ("Control+Shift+Space", Hotkey::PushToTalk),
+        ];
+        let mut registered: Vec<(u32, Hotkey)> = Vec::new();
+        for (combo, action) in combos {
             match HotKey::from_str(combo) {
-                Ok(hotkey) => {
-                    registered[index] = hotkey.id();
-                    if let Err(e) = manager.register(hotkey) {
-                        log::warn!("hotkey {combo} registration failed: {e}");
-                        registered[index] = 0;
-                    }
-                }
+                Ok(hotkey) => match manager.register(hotkey) {
+                    Ok(()) => registered.push((hotkey.id(), action)),
+                    Err(e) => log::warn!("hotkey {combo} registration failed: {e}"),
+                },
                 Err(e) => log::warn!("hotkey {combo} parse failed: {e}"),
             }
         }
         let receiver = GlobalHotKeyEvent::receiver();
         while let Ok(event) = receiver.recv() {
-            if event.state != HotKeyState::Pressed {
+            let Some(&(_, action)) = registered.iter().find(|(id, _)| *id == event.id) else { continue };
+            let pressed = event.state == HotKeyState::Pressed;
+            // Only push-to-talk cares about the release.
+            if !pressed && !matches!(action, Hotkey::PushToTalk) {
                 continue;
             }
-            let action = if event.id == registered[0] && registered[0] != 0 {
-                0
-            } else if event.id == registered[1] && registered[1] != 0 {
-                1
-            } else if event.id == registered[2] && registered[2] != 0 {
-                2
-            } else {
-                continue;
-            };
             post(move |app| match action {
-                0 => summon(app),
-                1 => toggle_mic(app),
-                _ => open_studio(app),
+                Hotkey::Summon => summon(app),
+                Hotkey::Mic => toggle_mic(app),
+                Hotkey::Studio => open_studio(app),
+                Hotkey::PushToTalk => push_to_talk(app, pressed),
             });
         }
     });
@@ -194,7 +197,7 @@ pub(crate) fn hide_bar(app: &AppHandle) {
 pub(crate) fn summon(app: &AppHandle) {
     let _ = app.borrow().ui.window().show();
     let pos = app.borrow().pos;
-    let _ = app
+    app
         .borrow()
         .ui
         .window()
@@ -202,7 +205,7 @@ pub(crate) fn summon(app: &AppHandle) {
     show_bar(app);
     say(
         app,
-        &config::flav("You summoned me with Alt+Space. Tell me what you need."),
+        &crate::persona::flav("You summoned me with Alt+Space. Tell me what you need."),
         "talking",
         vec!["summoned via global hotkey".into()],
         true,
@@ -242,8 +245,8 @@ pub(crate) fn open_quick_dial(app: &AppHandle) {
         }
     };
     wire_dial(&dial);
-    let (cx, cy) = crate::input::cursor_position();
-    let _ = dial
+    let (cx, cy) = crate::desktop::input::cursor_position();
+    dial
         .window()
         .set_position(PhysicalPosition::new(cx - 130, cy - 130));
     dial.show().ok();
@@ -255,14 +258,14 @@ pub(crate) fn open_quick_dial(app: &AppHandle) {
 /// above the bar, so it opens upward (above `at`) and only drops below when there is no room
 /// above; it grows to the right of `at` unless that would leave the screen.
 fn place_menu(menu: &ContextMenu, at: (i32, i32)) {
-    let (sx, sy, sw, sh) = crate::win32::work_area();
+    let (sx, sy, sw, sh) = crate::desktop::win32::work_area();
     let size = menu.window().size();
     let (w, h) = (size.width as i32, size.height as i32);
     let x = if at.0 + w <= sx + sw { at.0 } else { at.0 - w };
     let y = if at.1 - h >= sy { at.1 - h } else { at.1 };
     let x = x.clamp(sx, (sx + sw - w).max(sx));
     let y = y.clamp(sy, (sy + sh - h).max(sy));
-    let _ = menu.window().set_position(PhysicalPosition::new(x, y));
+    menu.window().set_position(PhysicalPosition::new(x, y));
 }
 
 pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
@@ -280,7 +283,7 @@ pub(crate) fn open_context_menu(app: &AppHandle, at: (i32, i32)) {
         }
     };
     wire_menu(&menu);
-    let _ = menu
+    menu
         .window()
         .set_position(PhysicalPosition::new(at.0.max(0), at.1.max(0)));
     menu.show().ok();
@@ -379,6 +382,18 @@ pub(crate) fn wire_menu(menu: &ContextMenu) {
                     "always_open"
                 };
                 config::update(|s| s.mic_mode = next.to_string());
+                apply_mic_settings();
+                say(
+                    app,
+                    if next == "always_open" {
+                        "Hands-free mode: I'm listening. Just talk to me."
+                    } else {
+                        "Click-to-talk mode: press the mic when you want me to listen."
+                    },
+                    "idle",
+                    vec![format!("mic mode: {next}")],
+                    false,
+                );
                 sync_studio(app);
             });
         });
@@ -435,7 +450,7 @@ pub(crate) fn wire_dial(dial: &QuickDial) {
                 crate::memory::adjust_emotion("groove", 3);
                 say(
                     app,
-                    &config::flav("Watch closely — spinning right here on your desktop."),
+                    &crate::persona::flav("Watch closely — spinning right here on your desktop."),
                     "dance",
                     vec![format!("dance, hype level {}", stat.level)],
                     true,

@@ -1,0 +1,16 @@
+[package]
+name = "aria-ui"
+version = "6.0.0"
+edition = "2021"
+publish = false
+description = "Aria's Slint windows, compiled once into their own crate"
+
+# Nothing but the generated UI lives here. Keeping it out of the `aria` crate means an edit to app
+# logic never re-type-checks the (large) generated code, and a `.slint` edit never recompiles the
+# app logic beyond relinking.
+
+[dependencies]
+slint = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }

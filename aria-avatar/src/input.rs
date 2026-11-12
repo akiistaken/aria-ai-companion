@@ -29,6 +29,8 @@ const HEADPAT_COOLDOWN: f32 = 5.0;
 /// Windows' default double-click time and a small travel tolerance.
 const DOUBLE_CLICK_SECS: f32 = 0.5;
 const DOUBLE_CLICK_SLOP: f32 = 6.0;
+/// A press held longer than this is not a click.
+const CLICK_MAX_HOLD: f32 = 0.6;
 /// Hover tolerance around the model's silhouette, in pixels.
 const HIT_RADIUS: i32 = 3;
 
@@ -77,6 +79,14 @@ impl GestureState {
         if self.over_model != Some(over) {
             self.over_model = Some(over);
             link.send(Event::HoverChanged { over });
+        }
+
+        // ---- A single click is only a click once no second one followed in time ----
+        if let Some((_, when)) = self.last_click {
+            if now - when > DOUBLE_CLICK_SECS {
+                self.last_click = None;
+                link.send(Event::Click);
+            }
         }
 
         // ---- Right and middle buttons: on press, over the model only ----
@@ -159,7 +169,7 @@ impl GestureState {
             // Release.
             if self.dragging {
                 link.send(Event::DragEnd);
-            } else if let Some((origin, _)) = self.press {
+            } else if let Some((origin, pressed_at)) = self.press {
                 match self.last_click {
                     Some((at, when))
                         if now - when <= DOUBLE_CLICK_SECS
@@ -168,6 +178,8 @@ impl GestureState {
                         self.last_click = None;
                         link.send(Event::Poke);
                     }
+                    // A long press without moving is neither a click nor a drag.
+                    _ if now - pressed_at > CLICK_MAX_HOLD => self.last_click = None,
                     _ => self.last_click = Some((origin, now)),
                 }
             }
@@ -235,6 +247,32 @@ mod tests {
             g.update(sample(100.0, 200.0, true), true, size, 0.05, &link);
             g.update(sample(100.0, 200.0, false), true, size, 0.05, &link);
         }
-        assert!(link.drain_sent().iter().any(|e| matches!(e, Event::Poke)));
+        let sent = link.drain_sent();
+        assert!(sent.iter().any(|e| matches!(e, Event::Poke)));
+        assert!(!sent.iter().any(|e| matches!(e, Event::Click)), "a double-click is not also a click");
+        // Time passes: nothing more, the double-click was consumed.
+        g.update(sample(100.0, 200.0, false), true, size, 1.0, &link);
+        assert!(!link.drain_sent().iter().any(|e| matches!(e, Event::Click)));
+    }
+
+    #[test]
+    fn one_click_becomes_a_click_after_the_double_click_window() {
+        let link = AvatarLink::detached();
+        let mut g = GestureState::default();
+        let size = Vec2::new(260.0, 370.0);
+        g.update(sample(100.0, 200.0, false), true, size, 0.03, &link);
+        g.update(sample(100.0, 200.0, true), true, size, 0.05, &link);
+        g.update(sample(100.0, 200.0, false), true, size, 0.05, &link);
+        assert!(!link.drain_sent().iter().any(|e| matches!(e, Event::Click)), "not yet: it may become a double-click");
+        g.update(sample(100.0, 200.0, false), true, size, 0.3, &link);
+        g.update(sample(100.0, 200.0, false), true, size, 0.3, &link);
+        assert_eq!(link.drain_sent().iter().filter(|e| matches!(e, Event::Click)).count(), 1);
+
+        // A long press is not a click.
+        g.update(sample(100.0, 200.0, true), true, size, 0.05, &link);
+        g.update(sample(100.0, 200.0, true), true, size, 0.9, &link);
+        g.update(sample(100.0, 200.0, false), true, size, 0.05, &link);
+        g.update(sample(100.0, 200.0, false), true, size, 1.0, &link);
+        assert!(!link.drain_sent().iter().any(|e| matches!(e, Event::Click)));
     }
 }

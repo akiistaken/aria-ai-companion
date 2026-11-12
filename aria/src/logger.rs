@@ -14,7 +14,7 @@ static LOGGER: OnceLock<Logger> = OnceLock::new();
 
 fn logger() -> &'static Logger {
     LOGGER.get_or_init(|| {
-        let dir = crate::config::logs_dir();
+        let dir = crate::config::data_subdir("logs");
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!("[aria] could not create log dir {}: {e}", dir.display());
         }
@@ -97,7 +97,7 @@ pub fn init() {
 }
 
 pub fn open_log_file() -> PathBuf {
-    let dir = crate::config::logs_dir();
+    let dir = crate::config::data_subdir("logs");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("aria.log");
     let _ = File::options().create(true).append(true).open(&path);

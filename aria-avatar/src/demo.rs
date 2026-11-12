@@ -132,7 +132,7 @@ impl Demo {
     /// Keeps a presented frame if a shot is due.
     pub fn offer(&mut self, rgba: &[u8], width: u32, height: u32) {
         // The first frames are empty while textures load and pipelines compile.
-        self.rendering = self.rendering || rgba.chunks_exact(4).step_by(7).any(|px| px[3] > 0);
+        self.rendering = self.rendering || rgba.as_chunks::<4>().0.iter().step_by(7).any(|px| px[3] > 0);
         if !self.shot_due {
             return;
         }
@@ -227,7 +227,7 @@ pub fn drive(mut demo: ResMut<Demo>, mut state: ResMut<AvatarState>, mut animato
     let frames = (step.seconds / STEP_SECS).round().max(1.0) as u32;
     // Shots are spread evenly, the last one on the step's final frame.
     let every = (frames / step.shots.max(1)).max(1);
-    if step.shots > 0 && demo.frame % every == 0 && demo.shots.len() < step.shots as usize {
+    if step.shots > 0 && demo.frame.is_multiple_of(every) && demo.shots.len() < step.shots as usize {
         demo.shot_due = true;
     }
     if demo.frame >= frames + 3 {

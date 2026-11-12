@@ -1,6 +1,8 @@
-//! Small shared helpers: time formatting, string cleanup, retry-free HTTP JSON.
+//! Small shared helpers: time, text and encoding.
 
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ---------------------------------------------------------------------------------- time
 
 pub fn unix_now() -> f64 {
     SystemTime::now()
@@ -23,9 +25,7 @@ pub struct LocalTime {
 
 /// Converts a UNIX timestamp to local civil time.
 pub fn local_time(ts: f64) -> LocalTime {
-    let t = ts as i64;
-    let (offset, _) = local_offset(t);
-    civil_from_unix(t + offset as i64)
+    civil_from_unix(ts as i64 + local_offset_secs())
 }
 
 fn civil_from_unix(secs: i64) -> LocalTime {
@@ -43,30 +43,17 @@ fn civil_from_unix(secs: i64) -> LocalTime {
     }
 }
 
-/// The OS timezone offset in seconds for the given instant.
-fn local_offset(_unix_secs: i64) -> (i32, bool) {
-    #[cfg(windows)]
-    {
-        use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
-        // TIME_ZONE_ID_DAYLIGHT is 2; the Win32 metadata does not export it as a constant.
-        const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
-        // Windows reports the bias in minutes west of UTC and already accounts for the
-        // current daylight-saving state in Bias unless the daylight id is returned.
-        unsafe {
-            let mut info = TIME_ZONE_INFORMATION::default();
-            let id = GetTimeZoneInformation(&mut info);
-            let minutes_west = if id == TIME_ZONE_ID_DAYLIGHT {
-                info.Bias + info.DaylightBias
-            } else {
-                info.Bias
-            };
-            (minutes_west.saturating_neg() * 60, id == TIME_ZONE_ID_DAYLIGHT)
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        (0, false)
-    }
+/// The OS timezone offset from UTC in seconds, daylight saving included.
+fn local_offset_secs() -> i64 {
+    use windows::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // TIME_ZONE_ID_DAYLIGHT is 2; the Win32 metadata does not export it as a constant.
+    const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+    let mut info = TIME_ZONE_INFORMATION::default();
+    // SAFETY: `info` is a valid, writable TIME_ZONE_INFORMATION.
+    let id = unsafe { GetTimeZoneInformation(&mut info) };
+    // Windows reports minutes *west* of UTC.
+    let minutes_west = if id == TIME_ZONE_ID_DAYLIGHT { info.Bias + info.DaylightBias } else { info.Bias };
+    -(minutes_west as i64) * 60
 }
 
 fn civil_from_days(z: i64) -> (i32, u32, u32) {
@@ -82,24 +69,21 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
     ((if m <= 2 { y + 1 } else { y }) as i32, m, d)
 }
 
-const WEEKDAYS: [&str; 7] = [
-    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
-];
+const WEEKDAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September",
-    "October", "November", "December",
+    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+    "November", "December",
 ];
 
-/// Formats a timestamp using a small subset of chrono's strftime tokens.
+/// Formats a timestamp using a small subset of strftime: `%Y %m %d %H %M %S %I %p %A %B %%`.
 pub fn format_stamp(ts: f64, fmt: &str) -> String {
     let t = local_time(ts);
     let hour12 = match t.hour % 12 {
         0 => 12,
         h => h,
     };
-    let ampm = if t.hour < 12 { "AM" } else { "PM" };
     let mut out = String::new();
-    let mut chars = fmt.chars().peekable();
+    let mut chars = fmt.chars();
     while let Some(c) = chars.next() {
         if c != '%' {
             out.push(c);
@@ -112,8 +96,8 @@ pub fn format_stamp(ts: f64, fmt: &str) -> String {
             Some('H') => out.push_str(&format!("{:02}", t.hour)),
             Some('M') => out.push_str(&format!("{:02}", t.minute)),
             Some('S') => out.push_str(&format!("{:02}", t.second)),
-            Some('I') => out.push_str(&format!("{:02}", hour12)),
-            Some('p') => out.push_str(ampm),
+            Some('I') => out.push_str(&format!("{hour12:02}")),
+            Some('p') => out.push_str(if t.hour < 12 { "AM" } else { "PM" }),
             Some('A') => out.push_str(WEEKDAYS[t.weekday as usize % 7]),
             Some('B') => out.push_str(MONTHS[(t.month as usize).clamp(1, 12) - 1]),
             Some('%') => out.push('%'),
@@ -131,6 +115,12 @@ pub fn now_stamp(fmt: &str) -> String {
     format_stamp(unix_now(), fmt)
 }
 
+pub fn now_hour() -> u32 {
+    local_time(unix_now()).hour
+}
+
+// ---------------------------------------------------------------------------------- text
+
 /// Trims to `max` chars on a word boundary where possible.
 pub fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
@@ -143,18 +133,48 @@ pub fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-pub fn now_hour() -> u32 {
-    local_time(unix_now()).hour
+/// "hello world" → "Hello world".
+pub fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
-// TODO(wire-up): greeting time-of-day helper, superseded by mood.rs.
-#[allow(dead_code)]
-pub fn today_hour_minute() -> (u32, u32) {
-    let t = local_time(unix_now());
-    (t.hour, t.minute)
+/// "Hello world" → "hello world".
+pub fn lowercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
-/// A tiny seeded RNG-free random in [lo, hi].
+/// "counter strike" → "Counter Strike".
+pub fn title_case(s: &str) -> String {
+    s.split_whitespace().map(capitalize).collect::<Vec<_>>().join(" ")
+}
+
+/// Percent-encodes everything outside the URL-safe set; spaces become `%20`.
+pub fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+pub fn base64(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+// ---------------------------------------------------------------------------------- random
+
 pub fn rand_range(lo: i32, hi: i32) -> i32 {
     if hi <= lo {
         return lo;
@@ -164,16 +184,12 @@ pub fn rand_range(lo: i32, hi: i32) -> i32 {
 }
 
 pub fn rand_f32() -> f32 {
-    use rand::Rng;
-    rand::rng().random::<f32>()
+    rand::random::<f32>()
 }
 
 pub fn pick_str<'a>(options: &'a [&'a str]) -> &'a str {
     use rand::seq::IndexedRandom;
-    options
-        .choose(&mut rand::rng())
-        .copied()
-        .unwrap_or_default()
+    options.choose(&mut rand::rng()).copied().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -183,16 +199,24 @@ mod tests {
     #[test]
     fn stamp_formatting_matches_tokens() {
         // 2026-11-11T12:00:00Z: midday UTC is still 2026-11-11 in every zone from -11 to +11.
-        let ts = 1_794_398_400.0;
-        let s = format_stamp(ts, "%Y-%m-%d %H:%M");
+        let s = format_stamp(1_794_398_400.0, "%Y-%m-%d %H:%M");
         assert_eq!(s.len(), 16, "got {s}");
         assert!(s.starts_with("2026-11-11"), "got {s}");
     }
 
     #[test]
     fn truncation_respects_limit() {
-        let long = "a".repeat(200);
-        assert!(truncate(&long, 20).chars().count() <= 20);
+        assert!(truncate(&"a".repeat(200), 20).chars().count() <= 20);
         assert_eq!(truncate("short", 20), "short");
+    }
+
+    #[test]
+    fn text_helpers() {
+        assert_eq!(title_case("counter strike"), "Counter Strike");
+        assert_eq!(capitalize("élan"), "Élan");
+        assert_eq!(lowercase_first("Hello"), "hello");
+        assert_eq!(urlencode("daft punk"), "daft%20punk");
+        assert_eq!(base64(b"Man"), "TWFu");
+        assert_eq!(base64(b"M"), "TQ==");
     }
 }

@@ -4,8 +4,8 @@ use super::*;
 
 /// Persona to accent colour, across every window.
 pub(crate) fn apply_persona(app: &AppHandle) {
-    let key = config::current_persona();
-    let profile = config::persona(&key);
+    let key = crate::persona::current_key();
+    let profile = crate::persona::get(&key);
     let (wash, edge) = accent_tints(profile.accent);
     {
         let mut a = app.borrow_mut();
@@ -50,7 +50,7 @@ pub(crate) fn apply_persona(app: &AppHandle) {
 }
 
 pub(crate) fn greeting(app: &AppHandle) {
-    let key = config::current_persona();
+    let key = crate::persona::current_key();
     let line = match key.as_str() {
     "yandere" => "I'm right here on your desktop watching over you. We're going to get so much done today.",
         "tomboy" => "Aria reporting in! Tell me what we're tackling first today.",
@@ -58,63 +58,48 @@ pub(crate) fn greeting(app: &AppHandle) {
         "kuudere" => "Aria operational. Diagnostics optimal. Standing by.",
         "genki" => "GOOD MORNING! Aria is pumped and 1000% ready to make today the greatest day ever.",
         "meganekko" => "*adjusts glasses* Aria reporting for duty. Cognitive engine primed. What problem shall we solve today?",
-        _ => "Good job today! I just happened to be nearby on your desktop if you need anything.",    };
-    say(app, &config::flav(line), "talking", vec![], true);
+        _ => "Good job today! I just happened to be nearby on your desktop if you need anything.",
+    };
+    say(app, &crate::persona::flav(line), "talking", vec![], true);
     let mut warm: Vec<(String, String)> = vec![(line.to_string(), "talking".into())];
-    for kind in ["poke", "shake", "headpat"] {
-        if let Some(text) = crate::reactions::first_line(&key, kind) {
-            let emotion = match kind {
-                "poke" => "annoyed",
-                "shake" => "dizzy",
-                _ => "happy",
-            };
+    for (kind, emotion) in [("poke", "annoyed"), ("shake", "dizzy"), ("headpat", "happy")] {
+        if let Some(text) = crate::persona::reactions::first_line(&key, kind) {
             warm.push((text, emotion.into()));
         }
     }
-    crate::voice::precache(&warm);
+    crate::voice::precache(warm);
 }
 
 /// The single speech path: bubble, stage expression, voice, auto-hide.
+///
+/// `speak` marks a real line (spoken when TTS is on). Real lines are also what a click on her
+/// brings back ([`show_last_chat`]); status lines like "Thinking…" are not.
 pub(crate) fn say(app: &AppHandle, text: &str, emotion: &str, logs: Vec<String>, speak: bool) {
-    let tts_on = {
+    let settings = config::get();
+    {
         let mut a = app.borrow_mut();
         a.full_bubble_text = text.to_string();
         a.typed = 0;
         a.last_emotion = emotion.to_string();
-        let subtitles = config::get().subtitles_enabled;
-        let tts_on = config::get().tts_enabled;
-        a.ui.set_bubble_text("".into());
-        a.ui.set_bubble_shown(subtitles);
-        a.ui.set_status_line(status_for(emotion).into());
-        tts_on
-    };
-    let duration_ms = ((text.chars().count() as f32) * 58.0).clamp(2200.0, 9500.0) as u64;
-    app.borrow_mut().bubble_hide_at =
-        Some(Instant::now() + Duration::from_millis(duration_ms + 3200));
-    sync_chrome(app);
-    {
-        let a = app.borrow();
-        let stage = &a.stage;
-        if matches!(emotion, "dance" | "groove") {
-            stage.set_music_vibe(true, 1.0);
-        } else if [
-            "idle", "sleepy", "walking", "sit", "annoyed", "angry", "sad", "cry", "thinking",
-        ]
-        .contains(&emotion)
-        {
-            stage.set_music_vibe(false, 0.0);
+        if speak && !text.trim().is_empty() {
+            a.last_chat = Some((text.to_string(), emotion.to_string()));
         }
-        // `talking` is only true while audio really plays; the motion tick keeps it current.
-        stage.set_state(emotion, crate::voice::is_speaking());
+        a.ui.set_bubble_text("".into());
+        a.ui.set_bubble_shown(settings.subtitles_enabled);
+        a.ui.set_status_line(status_for(emotion).into());
+        a.bubble_hide_at = Some(Instant::now() + bubble_duration(text) + Duration::from_millis(3200));
     }
+    sync_chrome(app);
+    // `talking` is only true while audio really plays; the motion tick keeps it current.
+    app.borrow().stage.set_state(emotion, crate::voice::is_speaking());
     for entry in &logs {
         log::info!("{entry}");
     }
     if speak {
-        if tts_on {
+        if settings.tts_enabled {
             crate::voice::speak_async(text, emotion);
         }
-        app.borrow_mut().speaking_until = Some(Instant::now() + Duration::from_millis(duration_ms));
+        app.borrow_mut().speaking_until = Some(Instant::now() + bubble_duration(text));
     }
     if let Some(studio) = app.borrow().studio.as_ref() {
         studio.set_status_text(logs.first().cloned().unwrap_or_default().into());
@@ -140,14 +125,37 @@ pub(crate) fn status_for(emotion: &str) -> &'static str {
         "groove" => "Vibing",
         "sit" => "Sitting",
         "sleepy" => "Resting",
+        "stretch" => "Stretching",
+        "look_around" => "Looking around",
+        "hum" => "Humming",
+        "twirl" => "Twirling",
+        "fix_hair" => "Fixing her hair",
+        "clap" => "Clapping",
         _ => "Standing by",
     }
+}
+
+/// How long a line stays up: long enough to read, never forever.
+fn bubble_duration(text: &str) -> Duration {
+    Duration::from_millis(((text.chars().count() as f32) * 58.0).clamp(2200.0, 9500.0) as u64)
 }
 
 /// Emotions that are a reaction to something said: they fade back to idle with the bubble.
 /// Sitting, dozing and dancing are things she keeps doing until something else happens.
 fn is_reaction(emotion: &str) -> bool {
     !matches!(emotion, "idle" | "sit" | "sleepy" | "dance" | "groove")
+}
+
+/// A click on her: brings back the last thing she said, without saying it again.
+pub(crate) fn show_last_chat(app: &AppHandle) {
+    let Some((text, emotion)) = app.borrow().last_chat.clone() else {
+        say(app, &crate::persona::flav("We haven't talked yet. Right-click me to open the chat bar!"), "wave", vec![], false);
+        return;
+    };
+    // Re-showing is not a new line: no voice, and the gesture stays calm rather than replaying
+    // the original reaction.
+    let calm = if is_reaction(&emotion) { "talking" } else { emotion.as_str() };
+    say(app, &text, calm, vec!["showing the last chat".into()], false);
 }
 
 pub(crate) fn hide_bubble(app: &AppHandle) {
@@ -164,31 +172,53 @@ pub(crate) fn hide_bubble(app: &AppHandle) {
     sync_chrome(app);
 }
 
+/// Click-to-talk: the mic button (or Ctrl+Shift+M) starts a recording, and again stops it.
 pub(crate) fn toggle_mic(app: &AppHandle) {
     if crate::voice::is_recording() {
         stop_mic(app);
+    } else {
+        start_mic(app, "Listening — click the mic again when you're done.");
+    }
+}
+
+/// Push-to-talk: recording while the key is held.
+pub(crate) fn push_to_talk(app: &AppHandle, held: bool) {
+    if config::get().mic_mode != "push_to_talk" {
         return;
     }
-    if crate::voice::start_recording() {
-        app.borrow().ui.set_recording(true);
-        say(
-            app,
-            "Listening — click the mic again when you're done.",
-            "idle",
-            vec!["recording from the microphone".into()],
-            false,
-        );
-    } else {
-        say(
-            app,
-            &config::flav(
-                "I couldn't reach your microphone. Check that an input device is connected.",
-            ),
-            "annoyed",
-            vec!["microphone unavailable".into()],
-            false,
-        );
+    match (held, crate::voice::is_recording()) {
+        (true, false) => start_mic(app, "Listening — let go of the keys when you're done."),
+        (false, true) => stop_mic(app),
+        _ => {}
     }
+}
+
+fn start_mic(app: &AppHandle, prompt: &str) {
+    match crate::voice::start_recording() {
+        Ok(()) => {
+            app.borrow().ui.set_recording(true);
+            say(app, prompt, "idle", vec!["recording from the microphone".into()], false);
+        }
+        Err(e) => say(
+            app,
+            &crate::persona::flav("I couldn't reach your microphone. Check the input device in the Control Center."),
+            "annoyed",
+            vec![format!("microphone unavailable: {e}")],
+            false,
+        ),
+    }
+}
+
+/// Starts, stops or restarts hands-free listening to match the mic settings. Called at startup
+/// and whenever the mic mode, wake word or input device changes.
+pub(crate) fn apply_mic_settings() {
+    crate::voice::listener::apply(|phrase| {
+        post(move |app| {
+            let include_screen = app.borrow().ui.get_vision();
+            show_bar(app);
+            submit_prompt(app, phrase, include_screen);
+        });
+    });
 }
 
 pub(crate) fn stop_mic(app: &AppHandle) {
@@ -196,7 +226,7 @@ pub(crate) fn stop_mic(app: &AppHandle) {
     let Some(wav) = crate::voice::stop_recording_wav() else {
         say(
             app,
-            &config::flav("I didn't hear anything on the mic. Try speaking a bit louder."),
+            &crate::persona::flav("I didn't hear anything on the mic. Try speaking a bit louder."),
             "idle",
             vec!["no audio captured".into()],
             false,
@@ -218,7 +248,7 @@ pub(crate) fn stop_mic(app: &AppHandle) {
             if clean.is_empty() {
                 say(
                     app,
-                    &config::flav("I couldn't catch any speech. Speak clearly and try again."),
+                    &crate::persona::flav("I couldn't catch any speech. Speak clearly and try again."),
                     "idle",
                     vec!["no speech recognised".into()],
                     false,
@@ -248,15 +278,11 @@ pub(crate) fn submit_prompt(app: &AppHandle, prompt: String, include_screen: boo
         app.borrow().stage.set_state("thinking", false);
     }
     std::thread::spawn(move || {
-        let reply = brain().chat(
-            &prompt,
-            include_screen,
-            &|location: &str, emotion: Option<&str>| {
-                let location = location.to_string();
-                let emotion = emotion.unwrap_or("walking").to_string();
-                post(move |app| walk_to(app, &location, &emotion));
-            },
-        );
+        let reply = crate::ai::chat(&prompt, include_screen, &|location: &str, emotion: Option<&str>| {
+            let location = location.to_string();
+            let emotion = emotion.unwrap_or("idle").to_string();
+            post(move |app| walk_to(app, &location, &emotion));
+        });
         post(move |app| {
             {
                 let mut a = app.borrow_mut();

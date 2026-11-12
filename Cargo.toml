@@ -1,8 +1,26 @@
 ﻿[workspace]
 resolver = "2"
-members = ["aria", "aria-avatar", "aria-protocol"]
+members = ["aria", "aria-avatar", "aria-build", "aria-protocol", "aria-ui"]
 # The vendored msedge-tts is a patched dependency, not one of our crates.
 exclude = ["vendor/msedge-tts"]
+
+# One version (and one base feature set) per shared dependency. Crates add features on top.
+[workspace.dependencies]
+aria-build = { path = "aria-build" }
+aria-protocol = { path = "aria-protocol" }
+aria-ui = { path = "aria-ui" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = "0.62"
+slint = { version = "1.18", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-femtovg",
+  "compat-1-18",
+  "unstable-winit-030",
+] }
+slint-build = "1.18"
 
 [profile.dev]
 opt-level = 1
@@ -14,9 +32,12 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
-# The app crate is mostly Slint-generated UI code plus light glue. Optimising it bought nothing
-# at runtime but made every `.slint` edit a ~2 minute rebuild.
+# The app crate is light glue, and the UI crate is generated Slint code. Optimising either bought
+# nothing at runtime but made every edit a long rebuild.
 [profile.dev.package.aria]
+opt-level = 0
+
+[profile.dev.package.aria-ui]
 opt-level = 0
 
 [profile.release]

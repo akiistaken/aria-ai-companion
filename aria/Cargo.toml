@@ -3,22 +3,33 @@ name = "aria"
 version = "6.0.0"
 edition = "2021"
 rust-version = "1.85"
+publish = false
 description = "Aria - autonomous desktop companion (Rust + Slint port)"
 
 [dependencies]
-slint = { version = "1.18", default-features = false, features = [
-  "std",
-  "backend-winit",
-  "renderer-femtovg",
-  "compat-1-18",
-  "unstable-winit-030",
-] }
+aria-protocol = { workspace = true }
+aria-ui = { workspace = true }
+slint = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 regex = "1"
 rand = "0.9"
-log = "0.4"
+# Already in the tree through async-openai; replaces a hand-rolled encoder.
+base64 = "0.22"
+
+# The AI endpoint: typed OpenAI-compatible client (chat completions, tool calls, reasoning effort,
+# prompt-cache keys). `rustls-no-provider` reuses the process-wide `ring` provider installed in
+# `main`, so no second crypto backend (aws-lc) is built.
+# `byot` lets responses decode into our own lenient struct: OpenAI-compatible providers add fields
+# and finish reasons (DeepSeek's `insufficient_system_resource`) the strict types would reject.
+async-openai = { version = "0.43", default-features = false, features = [
+  "chat-completion",
+  "byot",
+  "rustls-no-provider",
+] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
 msedge-tts = { path = "../vendor/msedge-tts", default-features = false, features = ["blocking"] }
 ureq = { version = "3", features = ["json"] }
@@ -30,7 +41,13 @@ rodio = { version = "0.23", default-features = false, features = [
 cpal = "0.18"
 wasapi = "0.27"
 sysinfo = "0.40"
-windows = { version = "0.62", features = [
+windows = { workspace = true, features = [
+  # System media sessions (what is playing, from any app or browser tab).
+  "Foundation",
+  "Foundation_Collections",
+  "Media_Control",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Power",
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
@@ -51,7 +68,6 @@ arboard = "3"
 global-hotkey = "0.10"
 md5 = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-aria-protocol = { path = "../aria-protocol" }
 
 [build-dependencies]
-slint-build = "1.18"
+aria-build = { workspace = true }

@@ -23,15 +23,73 @@ use crate::ik;
 use crate::locomotion::{air_pose, held_pose, AirInput, FootPose, Gait, GaitInput, HeldInput, Motion};
 use crate::pose::{Arm, HandShape, Pose};
 use crate::rig::{Bone, Rig, Side};
-use crate::spring::{approach, ease_out_back, smoothstep, Spring};
+use crate::spring::{approach, approach_factor, ease_out_back, smoothstep, smootherstep, Spring};
 
 /// How far she turns toward the direction she walks in. Short of a full profile, so the face stays
 /// readable and she keeps half an eye on the viewer.
 const WALK_YAW: f32 = 1.25;
 /// Seconds an emotion takes to blend in.
-const EMOTE_BLEND_SECS: f32 = 0.34;
+const EMOTE_BLEND_SECS: f32 = 0.42;
 /// Landing faster than this (m/s) leaves her seeing stars for a moment.
 const HARD_LANDING: f32 = 6.5;
+/// Her own tempo when no music sets one (dancing on request, humming).
+const DEFAULT_BPM: f32 = 122.0;
+/// Above this loudness the music gets a dance, below it a groove.
+const DANCE_ENERGY: f32 = 0.5;
+
+/// A measured beat from the app: tempo, and where in the beat the music is right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeatSync {
+    pub bpm: f32,
+    /// 0 on the beat, rising to 1 just before the next.
+    pub phase: f32,
+}
+
+/// Counts beats. Runs freely at its own tempo and is pulled (smoothly, never jumping) onto the
+/// music's beat whenever a [`BeatSync`] arrives.
+#[derive(Clone, Copy, Debug)]
+pub struct BeatClock {
+    pub beats: f64,
+    pub bpm: f32,
+    /// The tempo the music asked for last; she keeps it between measurements.
+    target_bpm: f32,
+    /// Phase correction still to be taken out, in beats.
+    pending: f32,
+}
+
+impl Default for BeatClock {
+    fn default() -> Self {
+        Self { beats: 0.0, bpm: DEFAULT_BPM, target_bpm: DEFAULT_BPM, pending: 0.0 }
+    }
+}
+
+impl BeatClock {
+    /// Advances by `dt`. `music` says whether music is playing: without it she drifts back to her
+    /// own tempo.
+    pub fn step(&mut self, dt: f32, sync: Option<BeatSync>, music: bool) {
+        if let Some(sync) = sync {
+            self.target_bpm = sync.bpm.clamp(60.0, 200.0);
+            // Phase error, wrapped to the nearer beat, measured against where the clock will be
+            // once the corrections still pending are in.
+            let have = (self.beats as f32 + self.pending).rem_euclid(1.0);
+            self.pending += (sync.phase - have + 0.5).rem_euclid(1.0) - 0.5;
+        }
+        if !music {
+            self.target_bpm = DEFAULT_BPM;
+        }
+        // Tempo eases toward the target (a jump would make every step lurch).
+        self.bpm += (self.target_bpm - self.bpm) * crate::spring::approach_factor(1.5, dt);
+        // The correction goes in over about a quarter of a second: a nudge, never a skip.
+        let take = self.pending * crate::spring::approach_factor(4.0, dt);
+        self.pending -= take;
+        self.beats += (dt * self.bpm / 60.0 + take) as f64;
+    }
+
+    /// Beats as `f32`, for the emotes (kept small so `f32` keeps its precision).
+    pub fn beat(&self) -> f32 {
+        self.beats.rem_euclid(4096.0) as f32
+    }
+}
 
 /// Everything the animator needs from the outside for one frame.
 pub struct Input {
@@ -43,6 +101,11 @@ pub struct Input {
     pub speech: Speech,
     /// Loudness of the music she is listening to, when there is any.
     pub music: f32,
+    /// The emotion is only "music is playing" (nothing else asked for), so she may dance or groove
+    /// as the music's loudness suggests.
+    pub music_fill: bool,
+    /// A fresh beat measurement this frame.
+    pub sync: Option<BeatSync>,
     /// 1 right after a head-pat, fading to 0.
     pub headpat: f32,
     pub peeking: PeekSide,
@@ -104,6 +167,11 @@ pub struct Animator {
     struggle: f32,
     talk: f32,
     drop: f32,
+    beat: BeatClock,
+    /// Music fill-in: dancing (true) or grooving, with hysteresis on the loudness.
+    music_dancing: bool,
+    /// The upper body as last shown, for the follow-through filter.
+    shown: Option<Pose>,
 }
 
 impl Default for Animator {
@@ -135,7 +203,29 @@ impl Default for Animator {
             struggle: 0.0,
             talk: 0.0,
             drop: 0.0,
+            beat: BeatClock::default(),
+            music_dancing: false,
+            shown: None,
         }
+    }
+}
+
+/// How quickly each bone follows its target in the follow-through filter (1/s). The trunk lags a
+/// little, the arms a little more, the hands least: that ordering is what reads as weight and
+/// follow-through. Legs, feet and hips are not filtered at all: the feet must stay exactly where
+/// IK put them, or they would slide.
+fn follow_rate(bone: Bone) -> Option<f32> {
+    use Bone::*;
+    match bone {
+        Hips | LeftUpperLeg | RightUpperLeg | LeftLowerLeg | RightLowerLeg | LeftFoot | RightFoot | LeftToes
+        | RightToes => None,
+        Spine | Chest | UpperChest => Some(26.0),
+        Neck | Head | Jaw | LeftEye | RightEye => Some(30.0),
+        LeftShoulder | RightShoulder => Some(24.0),
+        LeftUpperArm | RightUpperArm => Some(20.0),
+        LeftLowerArm | RightLowerArm => Some(22.0),
+        LeftHand | RightHand => Some(26.0),
+        _ => Some(34.0),
     }
 }
 
@@ -185,10 +275,45 @@ impl Animator {
         self.emote
     }
 
+    /// Eases the upper body toward `target` (see [`follow_rate`]); legs and hips pass through.
+    fn follow_through(&mut self, target: Pose, dt: f32) -> Pose {
+        let Some(mut shown) = self.shown.take() else {
+            self.shown = Some(target.clone());
+            return target;
+        };
+        for bone in Bone::ALL {
+            let i = bone.index();
+            shown.rot[i] = match follow_rate(*bone) {
+                Some(rate) => shown.rot[i].slerp(target.rot[i], approach_factor(rate, dt)).normalize(),
+                None => target.rot[i],
+            };
+        }
+        shown.hips = target.hips;
+        self.shown = Some(shown.clone());
+        shown
+    }
+
+    /// With music playing and nothing else going on: dance when it is loud, groove when it is
+    /// soft, with a little hysteresis so a quiet bar does not flip her back and forth.
+    fn music_emote(&mut self, input: &Input) -> Emote {
+        if !input.music_fill {
+            self.music_dancing = false;
+            return input.emote;
+        }
+        let threshold = if self.music_dancing { DANCE_ENERGY - 0.1 } else { DANCE_ENERGY + 0.05 };
+        self.music_dancing = input.music >= threshold;
+        if self.music_dancing {
+            Emote::Dance
+        } else {
+            Emote::Groove
+        }
+    }
+
     /// Evaluates the current emotion, cross-fading from the previous one.
     fn act(&mut self, rig: &Rig, input: &Input, t: f32, dt: f32) -> Act {
         self.stun = (self.stun - dt).max(0.0);
-        let wanted = if self.stun > 0.0 { Emote::Dizzy } else { input.emote };
+        let chosen = self.music_emote(input);
+        let wanted = if self.stun > 0.0 { Emote::Dizzy } else { chosen };
         if wanted != self.emote {
             self.from = self.last_act.take();
             self.emote = wanted;
@@ -197,6 +322,7 @@ impl Animator {
         }
         self.emote_time += dt;
         self.blend = (self.blend + dt / EMOTE_BLEND_SECS).min(1.0);
+        self.beat.step(dt, input.sync, input.music_fill || input.sync.is_some());
 
         let ctx = Ctx {
             rig,
@@ -205,13 +331,17 @@ impl Animator {
             style: input.style,
             talk: self.talk,
             energy: input.music,
+            beat: self.beat.beat(),
         };
         let mut act = emotes::act(self.emote, &ctx);
         if self.blend >= 1.0 {
             self.from = None;
         } else if let Some(from) = self.from.as_ref() {
+            // Big moves (into a dance, a stretch, a sit) settle with a slight anime overshoot;
+            // everything else eases in without one, which reads smoother.
+            let curve = if self.emote.is_lively() { ease_out_back(self.blend) } else { smootherstep(self.blend) };
             let mut mixed = from.clone();
-            mixed.blend(&act, ease_out_back(self.blend));
+            mixed.blend(&act, curve);
             act = mixed;
         }
         self.last_act = Some(act.clone());
@@ -315,26 +445,34 @@ impl Animator {
             let across = local[left] - local[right];
             let twist = (-0.45 * across.y.atan2(across.x.max(0.05))).clamp(-0.3, 0.3) * walk;
             let roll = ((feet[left].height - feet[right].height) / leg * 0.9).clamp(-0.12, 0.12) * walk;
+            // 0 with both feet down, 1 at the top of a step: drives the little bounces of a walk.
+            let lift = ((feet[left].height.max(feet[right].height)) / (0.1 * leg)).min(1.0);
             pose.pelvis(0.0, twist, roll);
             pose.spine(0.05 * walk + 0.16 * run, -twist * 1.6, -roll * 0.9);
-            let lead = ((local[right].y - local[left].y) / leg * 1.1).clamp(-0.7, 0.7);
+            // The head stays level and steady against the trunk, with a small nod each step.
+            pose.head(0.035 * walk * (lift - 0.5), twist * 0.9, roll * 0.6);
+            let lead = ((local[right].y - local[left].y) / leg * 1.35).clamp(-0.8, 0.8);
             let mut arms = Pose::default();
             for side in Side::BOTH {
                 let swing = lead * side.sign();
+                // Shoulders ride up a touch with each step.
+                arms.shrug(side, 0.03 * lift * walk, 0.02 * swing);
                 arms.arm(
                     side,
                     Arm {
-                        down: 1.3 - 0.1 * run,
+                        down: 1.3 - 0.1 * run - 0.06 * swing.abs(),
                         swing,
                         yaw: 0.0,
                         twist: 0.3,
-                        bend: 0.25 + 0.45 * swing.max(0.0) + 1.0 * run,
+                        bend: 0.3 + 0.45 * swing.max(0.0) + 1.0 * run,
                         pronate: 0.0,
                     },
                 );
-                arms.wrist(side, 0.08, 0.0, 0.0);
+                // Loose wrists trail the swing.
+                arms.wrist(side, 0.1 - 0.22 * swing, 0.0, 0.0);
                 arms.fingers(side, HandShape::RELAXED.mix(HandShape::LOOSE_FIST, run));
-                pose.blend_bones(&arms, emotes::arm_bones(side), walk * act.walk_arms);
+                let bones = emotes::arm_bones(side).chain([Bone::LeftShoulder.on(side)]);
+                pose.blend_bones(&arms, bones, walk * act.walk_arms);
             }
         }
         // Leaning into a start and rocking back out of a stop, in whichever direction she faces.
@@ -410,7 +548,9 @@ impl Animator {
         let spread = (feet[left].ground.distance(feet[right].ground) * 0.5).min(leg * 0.9);
         let bob = (leg - (leg * leg - spread * spread).sqrt()) * input.style.bounce.clamp(0.7, 1.6);
         let dip = (-self.crouch.value).clamp(-0.02 * leg, 0.38 * leg);
-        let lowered = 0.012 * leg + bob + act.crouch + dip;
+        // Walking on soft knees: a straight-legged walk is what looks stiff. Running sinks more.
+        let soft_knees = (0.028 * walk + 0.035 * run) * leg;
+        let lowered = 0.012 * leg + bob + act.crouch + dip + soft_knees;
 
         // ---- Feet -------------------------------------------------------------------------
         let layout = (sit > 0.001).then(|| emotes::sit_layout(rig));
@@ -485,6 +625,12 @@ impl Animator {
                 *slot = slot.slerp(rotation, self.ground);
             }
         }
+
+        // ---- Follow-through ---------------------------------------------------------------
+        // Every bone above the hips eases toward its target instead of snapping to it. That is
+        // what takes the stiffness out: gesture changes, hand IK switching targets and dance
+        // figures all flow, and arms trail the trunk a little.
+        let pose = self.follow_through(pose, dt);
 
         // ---- Root -------------------------------------------------------------------------
         // Tilt about the chest when carried, about the middle of the body when flying.
@@ -599,9 +745,66 @@ mod tests {
             look: Vec2::ZERO,
             speech: Speech::default(),
             music: 0.0,
+            music_fill: false,
+            sync: None,
             headpat: 0.0,
             peeking: PeekSide::None,
         }
+    }
+
+    #[test]
+    fn the_beat_clock_locks_onto_the_music_without_jumping() {
+        let mut clock = BeatClock::default();
+        let dt = 1.0 / 60.0;
+        // The music is at 100 BPM and its beat falls a quarter-beat away from ours.
+        let mut music_beats = 0.25f64;
+        let mut biggest_step = 0.0f64;
+        for frame in 0..60 * 8 {
+            music_beats += (dt * 100.0 / 60.0) as f64;
+            let sync = (frame % 60 == 0).then(|| BeatSync { bpm: 100.0, phase: music_beats.rem_euclid(1.0) as f32 });
+            let before = clock.beats;
+            clock.step(dt, sync, true);
+            biggest_step = biggest_step.max(clock.beats - before);
+        }
+        let error = ((clock.beats - music_beats).rem_euclid(1.0) + 0.5).rem_euclid(1.0) - 0.5;
+        assert!(error.abs() < 0.03, "phase error after 8 s: {error}");
+        assert!((clock.bpm - 100.0).abs() < 1.0, "tempo {}", clock.bpm);
+        assert!(biggest_step < 0.08, "the clock never skips: {biggest_step} beats in one frame");
+    }
+
+    #[test]
+    fn loud_music_gets_a_dance_and_soft_music_a_groove() {
+        let mut animator = Animator::default();
+        let mut music = input(Emote::Groove, BodyMode::Ground);
+        music.music_fill = true;
+        music.music = 0.8;
+        assert_eq!(animator.music_emote(&music), Emote::Dance);
+        music.music = 0.48;
+        assert_eq!(animator.music_emote(&music), Emote::Dance, "hysteresis keeps her dancing through a quiet bar");
+        music.music = 0.2;
+        assert_eq!(animator.music_emote(&music), Emote::Groove);
+        let asked = input(Emote::Sad, BodyMode::Ground);
+        assert_eq!(animator.music_emote(&asked), Emote::Sad, "an explicit emotion beats the music");
+    }
+
+    #[test]
+    fn follow_through_eases_the_arms_but_never_the_legs() {
+        let mut animator = Animator::default();
+        let rest = Pose::default();
+        animator.follow_through(rest.clone(), DT);
+        let mut moved = rest.clone();
+        moved.arm(Side::Left, Arm { down: -0.5, ..Arm::HANG });
+        moved.leg(Side::Left, 0.6, 0.0, 0.0, 0.4, 0.0);
+        let shown = animator.follow_through(moved.clone(), DT);
+        let (arm, leg) = (Bone::LeftUpperArm.index(), Bone::LeftUpperLeg.index());
+        assert_eq!(shown.rot[leg], moved.rot[leg], "legs pass straight through");
+        let left_to_go = shown.rot[arm].angle_between(moved.rot[arm]);
+        assert!(left_to_go > 0.1, "the arm is still on its way: {left_to_go}");
+        let mut settled = shown;
+        for _ in 0..60 {
+            settled = animator.follow_through(moved.clone(), DT);
+        }
+        assert!(settled.rot[arm].angle_between(moved.rot[arm]) < 0.01, "and arrives within a second");
     }
 
     /// Runs `frames` frames with the window moving at `speed` px/s (200 px per metre).

@@ -93,7 +93,7 @@ pub fn window_origin() -> Option<(i32, i32)> {
 
 fn wanted_pos() -> Option<(i32, i32)> {
     let packed = WANTED_POS.load(Ordering::SeqCst);
-    (packed != i64::MIN).then(|| ((packed >> 32) as i32, packed as i32))
+    (packed != i64::MIN).then_some(((packed >> 32) as i32, packed as i32))
 }
 
 /// Messages the renderer sends to the window thread.
@@ -447,7 +447,7 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
 /// Without premultiplication, semi-transparent edges bloom against the desktop. Fully transparent
 /// pixels (most of the frame) take the cheap branch.
 fn premultiply_bgra(src: &[u8], dst: &mut [u8]) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src.as_chunks::<4>().0.iter().zip(dst.as_chunks_mut::<4>().0.iter_mut()) {
         let a = s[3] as u32;
         match a {
             0 => d.copy_from_slice(&[0, 0, 0, 0]),

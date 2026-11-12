@@ -46,8 +46,19 @@ fn index_of(items: &[(&str, &str)], key: &str) -> i32 {
         .unwrap_or(0)
 }
 
+/// The Cua Driver toggle's hint. Only says what is known without probing (probing starts the
+/// driver, which must not happen on the UI thread).
+fn cua_status(enabled: bool) -> &'static str {
+    match (enabled, crate::ai::tools::cua_connected()) {
+        (false, _) => "Off: desktop actions use plain Win32 mouse and keyboard",
+        (true, Some(true)) => "Connected: background clicks and typing through the accessibility tree",
+        (true, Some(false)) => "Not running: install it from cua.ai/driver, then restart Aria",
+        (true, None) => "Background clicks and typing that never steal your cursor (connects on first use)",
+    }
+}
+
 fn voice_choices() -> Vec<(&'static str, &'static str)> {
-    crate::voice::VOICES
+    crate::voice::tts::VOICES
         .iter()
         .map(|v| (v.key, v.label))
         .collect()
@@ -95,8 +106,8 @@ pub fn sync_studio(app: &AppHandle) {
         return;
     };
     let settings = config::get();
-    let (mood, reason, _) = crate::mood::snapshot();
-    let profile = config::persona(&mood);
+    let (mood, reason, _) = crate::persona::mood::snapshot();
+    let profile = crate::persona::get(&mood);
     let (wash, edge) = accent_tints(profile.accent);
 
     studio.set_accent_color(hex_to_color(profile.accent));
@@ -176,6 +187,11 @@ pub fn sync_studio(app: &AppHandle) {
     studio.set_framings(choices(config::BODY_FRAMINGS));
     studio.set_lightings(choices(config::STAGE_LIGHTING));
     studio.set_mic_modes(choices(config::MIC_MODES));
+    studio.set_reasonings(choices(config::REASONING_LEVELS));
+    studio.set_reasoning_index(index_of(config::REASONING_LEVELS, &settings.reasoning));
+    studio.set_idle_events(settings.idle_events_enabled);
+    studio.set_cua(settings.cua_enabled);
+    studio.set_cua_status(cua_status(settings.cua_enabled).into());
 
     studio.set_voice_index(index_of(&voices, &settings.tts_voice));
     studio.set_model_index(index_of(config::AVAILABLE_MODELS, &settings.ai_model));
@@ -202,8 +218,8 @@ pub fn sync_studio(app: &AppHandle) {
     studio.set_api_key_masked(mask_key(&settings.deepseek_api_key).into());
     studio.set_clipboard(app.borrow().clipboard_watch);
 
-    studio.set_inputs(devices(&crate::audio::list_audio_devices(true)));
-    studio.set_outputs(devices(&crate::audio::list_audio_devices(false)));
+    studio.set_inputs(devices(&crate::desktop::audio::list_audio_devices(true)));
+    studio.set_outputs(devices(&crate::desktop::audio::list_audio_devices(false)));
 }
 
 pub fn wire_studio(studio: &ControlCenter) {
@@ -287,7 +303,7 @@ pub fn wire_studio(studio: &ControlCenter) {
             with_app(|app| {
                 say(
                     app,
-                    &config::flav("Got your reference clip — I'll keep it for voice work."),
+                    &crate::persona::flav("Got your reference clip — I'll keep it for voice work."),
                     "happy",
                     vec![format!("reference clip: {}", path.display())],
                     false,
@@ -298,43 +314,50 @@ pub fn wire_studio(studio: &ControlCenter) {
 
     on!(on_toggle_wake_word, |on| {
         config::update(|s| s.wake_word_enabled = on);
-        if on {
-            crate::voice::start_wake_word_listener(|text| {
-                log::info!("wake word heard: {text}");
-            });
-        }
+        crate::app::apply_mic_settings();
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_wake_word(on);
+                s.set_status_text(if on { "Wake word on: say “Hey Aria, …”" } else { "Wake word off." }.into());
             }
         });
     });
 
     on!(on_pick_mic_mode, |idx| {
-        if let Some((key, _)) = config::MIC_MODES.get(idx.max(0) as usize) {
+        if let Some((key, label)) = config::MIC_MODES.get(idx.max(0) as usize) {
             config::update(|s| s.mic_mode = (*key).to_string());
+            // A recording from the old mode must not linger.
+            if crate::voice::is_recording() {
+                let _ = crate::voice::stop_recording_wav();
+            }
+            crate::app::apply_mic_settings();
             with_app(|app| {
+                app.borrow().ui.set_recording(false);
                 if let Some(s) = app.borrow().studio.as_ref() {
                     s.set_mic_index(idx);
+                    s.set_status_text(format!("Mic: {label}").into());
                 }
             });
         }
     });
 
     on!(on_pick_input, |idx| {
-        let names = crate::audio::list_audio_devices(true);
+        let names = crate::desktop::audio::list_audio_devices(true);
         if let Some(name) = names.get(idx.max(0) as usize) {
             config::update(|s| s.input_audio_device = name.clone());
+            // The listener reopens the microphone on the new device.
+            crate::app::apply_mic_settings();
             with_app(|app| {
                 if let Some(s) = app.borrow().studio.as_ref() {
                     s.set_input_index(idx);
+                    s.set_status_text(format!("Microphone: {name}").into());
                 }
             });
         }
     });
 
     on!(on_pick_output, |idx| {
-        let names = crate::audio::list_audio_devices(false);
+        let names = crate::desktop::audio::list_audio_devices(false);
         if let Some(name) = names.get(idx.max(0) as usize) {
             config::update(|s| s.output_audio_device = name.clone());
             with_app(|app| {
@@ -383,7 +406,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     on!(on_toggle_discord, |on| {
         crate::discord::set_enabled(on);
         if on {
-            crate::discord::update("", "", &config::current_persona());
+            crate::discord::update("", "", &crate::persona::current_key());
         }
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
@@ -438,21 +461,47 @@ pub fn wire_studio(studio: &ControlCenter) {
         }
     });
 
-    on!(on_save_engine, |url, key| {
-        let url = url.to_string();
-        let key = key.to_string();
-        let is_masked = key.contains('\u{2026}');
-        config::update(|s| {
-            if !url.trim().is_empty() {
-                s.base_url = url.trim().to_string();
-            }
-            if !key.trim().is_empty() && !is_masked {
-                s.deepseek_api_key = key.trim().to_string();
+    on!(on_pick_reasoning, |idx| {
+        if let Some((key, label)) = config::REASONING_LEVELS.get(idx.max(0) as usize) {
+            config::update(|s| s.reasoning = (*key).to_string());
+            with_app(|app| {
+                if let Some(s) = app.borrow().studio.as_ref() {
+                    s.set_reasoning_index(idx);
+                    s.set_status_text(format!("Reasoning: {label}").into());
+                }
+            });
+        }
+    });
+
+    toggle_field!(on_toggle_idle_events, idle_events_enabled, set_idle_events);
+
+    on!(on_toggle_cua, |on| {
+        config::update(|s| s.cua_enabled = on);
+        with_app(|app| {
+            if let Some(s) = app.borrow().studio.as_ref() {
+                s.set_cua(on);
+                s.set_cua_status(cua_status(on).into());
+                s.set_status_text("Desktop driver change applies to new conversations after a restart.".into());
             }
         });
-        if !key.trim().is_empty() && !is_masked {
-            config::set_api_key(&key);
-            crate::brain::brain().reset_memory();
+    });
+
+    on!(on_save_engine, |url, key| {
+        let url = url.trim().to_string();
+        let key = key.trim().to_string();
+        // The field shows the saved key masked ("sk-abc…wxyz"); saving that back changes nothing.
+        let new_key = !key.is_empty() && !key.contains('\u{2026}') && key != config::get().deepseek_api_key;
+        config::update(|s| {
+            if !url.is_empty() {
+                s.base_url = url.clone();
+            }
+            if new_key {
+                s.deepseek_api_key = key.clone();
+            }
+        });
+        if new_key {
+            // A different account: start the conversation fresh.
+            crate::ai::reset();
         }
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
@@ -633,7 +682,7 @@ pub fn wire_studio(studio: &ControlCenter) {
     });
 
     on!(on_reset_conversation, || {
-        crate::brain::brain().reset_memory();
+        crate::ai::reset();
         with_app(|app| {
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_status_text("Conversation memory cleared.".into());
@@ -669,7 +718,7 @@ fn switch_avatar(app: &AppHandle, _mode: &str) {
     );
     say(
         app,
-        &config::flav("Reloaded my avatar. How does it look?"),
+        &crate::persona::flav("Reloaded my avatar. How does it look?"),
         "happy",
         vec!["avatar model reloaded".into()],
         false,

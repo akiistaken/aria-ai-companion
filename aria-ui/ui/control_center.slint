@@ -612,6 +612,7 @@ export component ControlCenter inherits Window {
     in-out property <[Choice]> framings;
     in-out property <[Choice]> lightings;
     in-out property <[Choice]> mic-modes;
+    in-out property <[Choice]> reasonings;
     in-out property <[DeviceEntry]> inputs;
     in-out property <[DeviceEntry]> outputs;
 
@@ -620,6 +621,7 @@ export component ControlCenter inherits Window {
     in-out property <int> framing-index: 1;
     in-out property <int> lighting-index: 0;
     in-out property <int> mic-index: 2;
+    in-out property <int> reasoning-index: 0;
     in-out property <int> input-index: 0;
     in-out property <int> output-index: 0;
     in-out property <int> tab: 0;
@@ -639,6 +641,9 @@ export component ControlCenter inherits Window {
     in property <bool> capsule: true;
     in property <bool> capsule-autohide: true;
     in property <bool> voice-follows-mood: false;
+    in property <bool> idle-events: true;
+    in property <bool> cua: true;
+    in property <string> cua-status: "";
     in property <float> avatar-scale: 1.0;
     in property <string> base-url: "";
     in property <string> api-key-masked: "";
@@ -669,6 +674,9 @@ export component ControlCenter inherits Window {
     callback toggle-capsule-autohide(bool);
     callback toggle-voice-mood(bool);
     callback pick-model(int);
+    callback pick-reasoning(int);
+    callback toggle-idle-events(bool);
+    callback toggle-cua(bool);
     callback save-engine(string, string);
     callback pick-framing(int);
     callback pick-lighting(int);
@@ -1205,7 +1213,7 @@ export component ControlCenter inherits Window {
                                     gap: 0px;
                                     ToggleRow {
                                         label: "Vibe to your music";
-                                        hint: "She dances when Spotify or YouTube plays";
+                                        hint: "Dances in time to Spotify, YouTube, SoundCloud, Wynk and any player";
                                         checked: root.music-vibe;
                                         toggled(v) => { root.toggle-music-vibe(v); }
                                     }
@@ -1242,6 +1250,28 @@ export component ControlCenter inherits Window {
                                         hint: "Diagnoses a traceback the moment you copy it";
                                         checked: root.clipboard;
                                         toggled(v) => { root.toggle-clipboard(v); }
+                                    }
+                                    ToggleRow {
+                                        divider: true;
+                                        label: "Idle moments";
+                                        hint: "Stretches, twirls and little asides, chosen by the AI to fit her mood";
+                                        checked: root.idle-events;
+                                        toggled(v) => { root.toggle-idle-events(v); }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Desktop control";
+                                Card {
+                                    pad-x: 4px;
+                                    pad-y: 4px;
+                                    gap: 0px;
+                                    ToggleRow {
+                                        label: "Cua Driver";
+                                        hint: root.cua-status;
+                                        checked: root.cua;
+                                        toggled(v) => { root.toggle-cua(v); }
                                     }
                                 }
                             }
@@ -1306,6 +1336,13 @@ export component ControlCenter inherits Window {
                                         chosen(idx) => { root.pick-model(idx); }
                                     }
                                     Rectangle { height: 1px; background: Theme.hairline; }
+                                    OptionList {
+                                        label: "Reasoning";
+                                        options: root.reasonings;
+                                        selected: root.reasoning-index;
+                                        chosen(idx) => { root.pick-reasoning(idx); }
+                                    }
+                                    Rectangle { height: 1px; background: Theme.hairline; }
                                     FormRow {
                                         label: "Base URL";
                                         url-field := TextField {
@@ -1320,18 +1357,22 @@ export component ControlCenter inherits Window {
                                     }
                                     FormRow {
                                         label: "API key";
-                                        TextField {
+                                        key-field := TextField {
                                             text: root.api-key-masked;
-                                            placeholder: "Paste your key…";
-                                            edited(t) => { root.save-engine(url-field.text, t); }
+                                            placeholder: "Paste your key, then Enter";
+                                            accepted(t) => { root.save-engine(url-field.text, t); }
+                                        }
+                                        ActionButton {
+                                            label: "Save";
+                                            clicked => { root.save-engine(url-field.text, key-field.text); }
                                         }
                                     }
                                     HorizontalLayout {
                                         padding-left: 100px;
                                         Text {
                                             text: root.api-key-masked == ""
-                                                ? "No key set. Aria falls back to offline tools and local Ollama."
-                                                : "Key saved. Offline tools keep working without it.";
+                                                ? "No key set. Aria needs one to talk: every reply comes from this endpoint."
+                                                : "Key saved. Replies, tools and idle moments all go through this endpoint.";
                                             color: Theme.text-muted;
                                             font-size: 11.5px;
                                             font-family: Theme.font-ui;

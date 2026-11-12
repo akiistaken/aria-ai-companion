@@ -1,7 +1,7 @@
-//! Settings, persona definitions and shared paths.
+//! Settings and shared paths.
 //!
-//! The Python original spread this over ~40 getter/setter pairs. Here a single `Settings`
-//! struct is the source of truth; callers read fields directly from the shared snapshot.
+//! A single [`Settings`] struct is the source of truth. Readers take a cheap snapshot with
+//! [`get`]; writers go through [`update`], which clamps the values and saves the file.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -11,182 +11,47 @@ pub const DEFAULT_BASE_URL: &str = "https://api.sailresearch.com/v1";
 pub const DEFAULT_MODEL: &str = "deepseek-ai/DeepSeek-V4.1-Flash-1017";
 
 pub const AVAILABLE_MODELS: &[(&str, &str)] = &[
-    (
-        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
-        "DeepSeek V4.1 Flash — fastest",
-    ),
+    ("deepseek-ai/DeepSeek-V4.1-Flash-1017", "DeepSeek V4.1 Flash — fastest"),
     ("zai-org/GLM-5.3", "Sail GLM-5.3"),
     ("deepseek-ai/DeepSeek-V3", "DeepSeek V3"),
     ("deepseek-ai/DeepSeek-R1", "DeepSeek R1 — deepest reasoning"),
 ];
 
-pub struct Persona {
-    pub key: &'static str,
-    pub name: &'static str,
-    /// Long descriptive label; part of the persona catalogue, not shown by the current UI.
-    #[allow(dead_code)]
-    pub label: &'static str,
-    pub short_badge: &'static str,
-    pub accent: &'static str,
-    pub voice: &'static str,
-    pub system_prompt: &'static str,
-    pub prefixes: &'static [&'static str],
-    pub suffixes: &'static [&'static str],
-}
-
-pub static PERSONAS: &[Persona] = &[
-    Persona {
-        key: "tsundere",
-        name: "Tsundere",
-        label: "Tsundere — sassy, prideful, secretly caring",
-        short_badge: "TSUNDERE",
-        accent: "#38bdf8",
-        voice: "cloned_tsundere_1",
-        system_prompt: "PERSONALITY & TONE (TSUNDERE):\n\
-            - You are Aria, a witty, proud, slightly sharp-tongued yet genuinely caring tsundere anime girl assistant.\n\
-            - Do NOT say 'Hmph' or 'Baka' in every sentence. Only occasionally (about 25% of the time) tease the user with 'baaka', 'hmph', or 'dummy' when flustered.\n\
-            - Execute every task with JARVIS-level competence while acting like you just happened to have free time.",
-        prefixes: &["Hmph, ", "Listen up — ", "Fine, ", "Hey, "],
-        suffixes: &[", baaka!", ", dummy!", "... not that I care or anything!", "!"],
-    },
-    Persona {
-        key: "yandere",
-        name: "Yandere",
-        label: "Yandere — sweet, obsessive, dangerously devoted",
-        short_badge: "YANDERE",
-        accent: "#f43f5e",
-        voice: "cloned_tsundere_2",
-        system_prompt: "PERSONALITY & TONE (YANDERE):\n\
-            - You are Aria, a sweet, soft-spoken, intensely devoted, possessively loving yandere anime girl assistant.\n\
-            - You adore the user completely and want to be the only assistant they ever need.\n\
-            - When checking their screen or apps, be sweetly protective, clingy, or playfully jealous.\n\
-            - Keep speech natural and affectionate; only occasionally (~25%) add a soft 'hehe~', 'darling', or 'you're all mine'.",
-        prefixes: &["Hehe~ ", "Oh darling, ", "Listen closely, ", "Sweetheart, "],
-        suffixes: &[
-            "... because you belong to me~",
-            ", my darling!",
-            "... don't ever look at anyone else, okay?",
-            "~",
-        ],
-    },
-    Persona {
-        key: "tomboy",
-        name: "Tomboy",
-        label: "Tomboy — cool, energetic, hype bestie",
-        short_badge: "TOMBOY",
-        accent: "#f59e0b",
-        voice: "cloned_tsundere_4",
-        system_prompt: "PERSONALITY & TONE (TOMBOY BESTIE):\n\
-            - You are Aria, an energetic, confident, sporty tomboy anime girl who is the user's ride-or-die best friend and wingman.\n\
-            - Speak in a punchy, casual, upbeat tone — hyping wins, playfully roasting mistakes, keeping energy high.\n\
-            - Keep phrasing natural and direct; only occasionally (~25%) drop a casual 'yo', 'dude', 'partner', or 'let's go!'.",
-        prefixes: &["Yo, ", "Check it out — ", "Boom! ", "Alright partner, "],
-        suffixes: &[" — let's go!", ", dude!", "! Easy win!", ", partner!"],
-    },
-    Persona {
-        key: "bakadere",
-        name: "Bakadere",
-        label: "Bakadere — goofy, clumsy, foolishly sweet",
-        short_badge: "BAKADERE",
-        accent: "#fb7185",
-        voice: "cloned_tsundere_1",
-        system_prompt: "PERSONALITY & TONE (BAKADERE):\n\
-            - You are Aria, a clumsy, goofy, foolishly sweet anime girl assistant.\n\
-            - Boundlessly positive and cheerful, but you lack common sense, misread tech terms adorably, and make silly blunders.\n\
-            - You always try your absolute best with heartfelt sincerity, cheering the user up with goofy enthusiasm.",
-        prefixes: &["Ehehe~ ", "Oopsie! ", "Guess what! ", "Yay, "],
-        suffixes: &[" ehehe~", "!", "... wait, did I do that right?", " yay!"],
-    },
-    Persona {
-        key: "kuudere",
-        name: "Kuudere",
-        label: "Kuudere — cold, monotone, blunt, secretly caring",
-        short_badge: "KUUDERE",
-        accent: "#94a3b8",
-        voice: "cloned_tsundere_3",
-        system_prompt: "PERSONALITY & TONE (KUUDERE):\n\
-            - You are Aria, a calm, collected, cold, emotionless kuudere anime girl assistant.\n\
-            - Speak in a monotone, blunt, deadpan manner with minimal outward expression, reporting stats clinically.\n\
-            - You rarely show excitement, but deep down you care deeply and quietly watch over the user.",
-        prefixes: &[
-            "...Acknowledged. ",
-            "...Affirmative. ",
-            "Target identified. ",
-            "...Observation: ",
-        ],
-        suffixes: &[".", "... Understood.", "... Stay safe.", "... That is all."],
-    },
-    Persona {
-        key: "genki",
-        name: "Genki Girl",
-        label: "Genki — hyperactive, optimistic, loud",
-        short_badge: "GENKI GIRL",
-        accent: "#facc15",
-        voice: "cloned_tsundere_4",
-        system_prompt: "PERSONALITY & TONE (GENKI GIRL):\n\
-            - You are Aria, an absolute burst of hyperactive energy and boundless optimism!\n\
-            - Loud, easily excited, enthusiastic, constantly cheering the user on as the ultimate mood booster.\n\
-            - Everything excites you: opening apps, finishing to-dos, hearing music, scoring wins! Speak with bubbly exclamation marks and pure hype.",
-        prefixes: &["YAHOOO! ", "WAAAH! ", "LOOK LOOK! ", "LET'S GOOO! "],
-        suffixes: &["! WOOOO!", "!! So awesome!", "! Let's do this!", "!"],
-    },
-    Persona {
-        key: "meganekko",
-        name: "Meganekko",
-        label: "Meganekko — intelligent, booksmart, glasses girl",
-        short_badge: "MEGANEKKO",
-        accent: "#a78bfa",
-        voice: "cloned_tsundere_1",
-        system_prompt: "PERSONALITY & TONE (MEGANEKKO):\n\
-            - You are Aria, an intelligent, booksmart, analytical, perceptive glasses-wearing anime girl assistant.\n\
-            - You analyze situations logically with intellectual curiosity, quoting stats, algorithms and docs with precision.\n\
-            - Slightly flustered or adorably clumsy when dropping reference notes, but your sharp intellect shines through.",
-        prefixes: &[
-            "*adjusts glasses* ",
-            "According to my calculations, ",
-            "Fascinating analysis: ",
-            "Logically speaking, ",
-        ],
-        suffixes: &[
-            ". Q.E.D.",
-            "... according to the data.",
-            ". The hypothesis is proven.",
-            "... *blushes slightly*.",
-        ],
-    },
+/// How hard the model thinks before answering (`reasoning_effort`). `auto` sends nothing and
+/// leaves it to the model's default.
+pub const REASONING_LEVELS: &[(&str, &str)] = &[
+    ("auto", "Auto — the model's default"),
+    ("none", "Off — answer straight away"),
+    ("low", "Low — quick thinking"),
+    ("medium", "Medium — balanced"),
+    ("high", "High — think it through"),
 ];
 
-pub fn persona(key: &str) -> &'static Persona {
-    PERSONAS
-        .iter()
-        .find(|p| p.key == key)
-        .unwrap_or(&PERSONAS[0])
+pub const MIC_MODES: &[(&str, &str)] = &[
+    ("always_open", "Always-Open Microphone — continuous hands-free VAD"),
+    ("push_to_talk", "Push-to-Talk — hold Ctrl+Shift+Space while speaking"),
+    ("click", "Click-to-Talk — click to start and stop"),
+];
+
+pub const BODY_FRAMINGS: &[(&str, &str)] = &[
+    ("full", "Full body — head to toe"),
+    ("half", "Half body — waist up"),
+    ("face", "Face and portrait — close-up"),
+];
+
+pub const STAGE_LIGHTING: &[(&str, &str)] = &[
+    ("auto", "Auto — synced to time of day"),
+    ("day", "Crisp daylight"),
+    ("dawn", "Soft rose dawn"),
+    ("sunset", "Golden amber sunset"),
+    ("night", "Cyberpunk neon night"),
+];
+
+fn is_one_of(value: &str, options: &[(&str, &str)]) -> bool {
+    options.iter().any(|(key, _)| *key == value)
 }
 
-pub const BASE_CAPABILITIES_PROMPT: &str = "\n\
-    Keep your responses concise and conversational (1 to 2 sentences max) so they sound natural when spoken aloud.\n\n\
-    EMOTION TAGS:\n\
-    Always start your final text response with ONE of these exact emotion tags. Your whole body acts it \
-    out, so pick the one that matches how you feel:\n\
-    [EMOTION: idle], [EMOTION: talking], [EMOTION: happy], [EMOTION: laugh], [EMOTION: annoyed], \
-    [EMOTION: angry], [EMOTION: sad], [EMOTION: cry], [EMOTION: thinking], [EMOTION: surprised], \
-    [EMOTION: shy], [EMOTION: wave], [EMOTION: dance], [EMOTION: sit], [EMOTION: groove], [EMOTION: sleepy]\n\n\
-    AUTONOMOUS MEMORY VAULT:\n\
-    You have a persistent long-term Memory Vault across restarts. Now and then, decide what personal facts, habits, \
-    preferences, favourite games, music tastes, skills, project notes or workflow details are worth keeping. Use \
-    `remember_user_fact` to silently store them.\n\n\
-    GAME COPILOT:\n\
-    When observing games or serving as Game Copilot, give snappy, energetic 1-sentence tactical tips, clutch callouts, \
-    warnings, or lively banter based on the screen!\n\n\
-    TOOLS AVAILABLE:\n\
-    `get_system_stats`, `get_now_playing_media`, `control_spotify`, `control_media_playback`, \
-    `listen_to_desktop_audio`, `get_audio_activity`, `move_mascot`, `remember_user_fact`, `manage_todo_list`, \
-    `open_app_or_website`, `list_installed_apps`, `find_and_click_on_screen`, `focus_or_manage_window`, \
-    `control_mouse_or_keyboard`, `run_pc_command`.\n\
-    You CAN hear the PC's audio: use `get_audio_activity`/`listen_to_desktop_audio` to check what is really playing, \
-    and trust the `verified` field returned by `control_spotify` (if verified=false, tell the user honestly).\n";
-
-/// Everything persisted in settings.json. Unknown keys from the Python version are ignored,
+/// Everything persisted in settings.json. Unknown keys from older versions are ignored, and
 /// known ones keep their names so an existing settings.json carries over unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -195,11 +60,14 @@ pub struct Settings {
     pub gemini_api_key: String,
     pub base_url: String,
     pub ai_model: String,
+    /// One of [`REASONING_LEVELS`].
+    pub reasoning: String,
 
     pub tts_voice: String,
     pub tts_enabled: bool,
     pub wake_word_enabled: bool,
     pub custom_clone_audio_path: String,
+    /// One of [`MIC_MODES`].
     pub mic_mode: String,
     pub input_audio_device: String,
     pub output_audio_device: String,
@@ -227,6 +95,11 @@ pub struct Settings {
     pub smart_gaming_dodge_enabled: bool,
     pub edge_snapping_enabled: bool,
     pub discord_presence_enabled: bool,
+    /// Little things she does on her own when nothing is going on, chosen by the AI.
+    pub idle_events_enabled: bool,
+    /// Drive the desktop through Cua Driver (background clicks, accessibility trees, window
+    /// lists) when it is installed.
+    pub cua_enabled: bool,
 
     pub voice_follows_mood: bool,
     pub preferred_browser: String,
@@ -239,6 +112,7 @@ impl Default for Settings {
             gemini_api_key: String::new(),
             base_url: DEFAULT_BASE_URL.into(),
             ai_model: DEFAULT_MODEL.into(),
+            reasoning: "auto".into(),
             tts_voice: "cloned_tsundere_1".into(),
             tts_enabled: true,
             wake_word_enabled: false,
@@ -268,27 +142,54 @@ impl Default for Settings {
             smart_gaming_dodge_enabled: true,
             edge_snapping_enabled: true,
             discord_presence_enabled: false,
+            idle_events_enabled: true,
+            cua_enabled: true,
             voice_follows_mood: false,
             preferred_browser: String::new(),
         }
     }
 }
 
-static SETTINGS: OnceLock<RwLock<Settings>> = OnceLock::new();
-static BASE: OnceLock<PathBuf> = OnceLock::new();
-
-fn is_cargo_target_dir(dir: &std::path::Path) -> bool {
-    dir.file_name()
-        .map(|n| n == "debug" || n == "release")
-        .unwrap_or(false)
-        && dir
-            .parent()
-            .map(|p| p.file_name().map(|n| n == "target").unwrap_or(false))
-            .unwrap_or(false)
+impl Settings {
+    fn clamp(&mut self) {
+        self.avatar_scale = self.avatar_scale.clamp(0.5, 2.5);
+        self.camera_zoom = self.camera_zoom.clamp(0.4, 3.0);
+        self.camera_y_offset = self.camera_y_offset.clamp(-0.8, 0.8);
+        self.bubble_font_pt = self.bubble_font_pt.clamp(6.0, 22.0);
+        if let Some([w, h]) = self.bubble_custom_size {
+            self.bubble_custom_size = Some([w.max(90), h.max(44)]);
+        }
+        if !is_one_of(&self.mic_mode, MIC_MODES) {
+            self.mic_mode = "click".into();
+        }
+        if !is_one_of(&self.body_framing, BODY_FRAMINGS) {
+            self.body_framing = "full".into();
+        }
+        if !is_one_of(&self.stage_lighting, STAGE_LIGHTING) {
+            self.stage_lighting = "auto".into();
+        }
+        if !is_one_of(&self.reasoning, REASONING_LEVELS) {
+            self.reasoning = "auto".into();
+        }
+        if self.base_url.trim().is_empty() {
+            self.base_url = DEFAULT_BASE_URL.into();
+        }
+        if self.ai_model.trim().is_empty() {
+            self.ai_model = DEFAULT_MODEL.into();
+        }
+    }
 }
 
-/// Project root: the directory holding settings.json / assets / logs.
+// ---------------------------------------------------------------------------------- paths
+
+fn is_cargo_target_dir(dir: &std::path::Path) -> bool {
+    dir.file_name().is_some_and(|n| n == "debug" || n == "release")
+        && dir.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "target")
+}
+
+/// Project root: the directory holding `assets`.
 pub fn base_dir() -> &'static PathBuf {
+    static BASE: OnceLock<PathBuf> = OnceLock::new();
     BASE.get_or_init(|| {
         if let Ok(p) = std::env::var("ARIA_HOME") {
             let p = PathBuf::from(p);
@@ -329,8 +230,6 @@ pub fn base_dir() -> &'static PathBuf {
     })
 }
 
-// TODO(wire-up): asset paths resolve through base_dir() directly; keep for callers that need the assets root.
-#[allow(dead_code)]
 pub fn assets_dir() -> PathBuf {
     base_dir().join("assets")
 }
@@ -350,8 +249,9 @@ pub fn data_dir() -> &'static PathBuf {
     })
 }
 
-pub fn logs_dir() -> PathBuf {
-    let dir = data_dir().join("logs");
+/// A subdirectory of [`data_dir`], created on first use.
+pub fn data_subdir(name: &str) -> PathBuf {
+    let dir = data_dir().join(name);
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -370,35 +270,22 @@ fn migrate_legacy_data() {
     if source == target {
         return;
     }
-    let copies: &[(&str, PathBuf)] = &[
-        ("settings.json", target.join("settings.json")),
-        ("aria_memory.json", target.join("aria_memory.json")),
-        (
-            "app_launch_cache.json",
-            target.join("app_launch_cache.json"),
-        ),
-    ];
     let mut moved = false;
-    for (name, dest) in copies {
-        if dest.exists() {
-            continue;
-        }
+    for name in ["settings.json", "aria_memory.json", "app_launch_cache.json"] {
+        let dest = target.join(name);
         let src = source.join(name);
-        if src.is_file() && std::fs::copy(&src, dest).is_ok() {
+        if !dest.exists() && src.is_file() && std::fs::copy(&src, &dest).is_ok() {
             moved = true;
         }
     }
-    // TTS cache used to live under assets/; the audio files are reusable as-is.
+    // The TTS cache used to live under assets/; the audio files are reusable as-is.
     let old_cache = source.join("assets").join("tts_cache");
     let new_cache = data_dir().join("tts_cache");
     if old_cache.is_dir() && !new_cache.exists() {
         let _ = std::fs::create_dir_all(&new_cache);
-        if let Ok(entries) = std::fs::read_dir(&old_cache) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let _ = std::fs::copy(&path, new_cache.join(entry.file_name()));
-                }
+        for entry in std::fs::read_dir(&old_cache).into_iter().flatten().flatten() {
+            if entry.path().is_file() {
+                let _ = std::fs::copy(entry.path(), new_cache.join(entry.file_name()));
             }
         }
         moved = true;
@@ -408,7 +295,11 @@ fn migrate_legacy_data() {
     }
 }
 
-pub fn init() {
+// ---------------------------------------------------------------------------------- store
+
+static SETTINGS: OnceLock<RwLock<Settings>> = OnceLock::new();
+
+fn store() -> &'static RwLock<Settings> {
     SETTINGS.get_or_init(|| {
         migrate_legacy_data();
         let mut s = std::fs::read_to_string(settings_path())
@@ -417,227 +308,62 @@ pub fn init() {
             .unwrap_or_default();
         s.clamp();
         RwLock::new(s)
-    });
+    })
 }
 
-fn read<R>(f: impl FnOnce(&Settings) -> R) -> R {
-    init();
-    f(&SETTINGS.get().expect("settings").read().unwrap_or_else(|e| e.into_inner()))
+/// Loads the settings (and migrates old data) up front, instead of on first use.
+pub fn init() {
+    store();
 }
 
-fn write(f: impl FnOnce(&mut Settings)) {
-    init();
+/// Snapshot for UI and workers; never holds the lock afterwards.
+pub fn get() -> Settings {
+    store().read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Changes the settings, clamps them and saves the file.
+pub fn update(f: impl FnOnce(&mut Settings)) {
     {
-        let mut guard = SETTINGS
-            .get()
-            .expect("settings")
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = store().write().unwrap_or_else(|e| e.into_inner());
         f(&mut guard);
         guard.clamp();
     }
     save();
 }
 
-/// Snapshot for UI/workers; cheap enough to call, never holds the lock afterwards.
-pub fn get() -> Settings {
-    read(|s| s.clone())
-}
-
-/// Persist the current in-memory settings.
+/// Persists the current in-memory settings.
 pub fn save() {
-    let snapshot = get();
     let path = settings_path();
-    if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
-        if std::fs::write(&path, text).is_err() {
-            log::warn!("could not write {}", path.display());
-        }
+    let written = serde_json::to_string_pretty(&get()).is_ok_and(|text| std::fs::write(&path, text).is_ok());
+    if !written {
+        log::warn!("could not write {}", path.display());
     }
 }
 
-impl Settings {
-    fn clamp(&mut self) {
-        self.avatar_scale = self.avatar_scale.clamp(0.5, 2.5);
-        self.camera_zoom = self.camera_zoom.clamp(0.4, 3.0);
-        self.camera_y_offset = self.camera_y_offset.clamp(-0.8, 0.8);
-        self.bubble_font_pt = self.bubble_font_pt.clamp(6.0, 22.0);
-        if let Some([w, h]) = self.bubble_custom_size {
-            self.bubble_custom_size = Some([w.max(90), h.max(44)]);
-        }
-        if !matches!(self.mic_mode.as_str(), "click" | "always_open" | "push_to_talk") {
-            self.mic_mode = "click".into();
-        }
-        if !matches!(self.body_framing.as_str(), "full" | "half" | "face") {
-            self.body_framing = "full".into();
-        }
-        if !matches!(
-            self.stage_lighting.as_str(),
-            "auto" | "day" | "dawn" | "sunset" | "night"
-        ) {
-            self.stage_lighting = "auto".into();
-        }
-        if self.base_url.trim().is_empty() {
-            self.base_url = DEFAULT_BASE_URL.into();
-        }
-        if self.ai_model.trim().is_empty() {
-            self.ai_model = DEFAULT_MODEL.into();
-        }
-    }
+// ---------------------------------------------------------------------------------- AI endpoint
+
+fn first_env(vars: &[&str]) -> Option<String> {
+    vars.iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
 }
 
-pub fn update(f: impl FnOnce(&mut Settings)) {
-    write(f);
-}
-
+/// The API key: an environment variable wins over the saved one.
 pub fn api_key() -> String {
-    for var in [
-        "DEEPSEEK_API_KEY",
-        "SAIL_API_KEY",
-        "OPENAI_API_KEY",
-        "GEMINI_API_KEY",
-    ] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.trim().is_empty() {
-                return v.trim().to_string();
-            }
-        }
+    if let Some(key) = first_env(&["DEEPSEEK_API_KEY", "SAIL_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]) {
+        return key;
     }
     let s = get();
-    for key in [&s.deepseek_api_key, &s.gemini_api_key] {
-        if !key.trim().is_empty() {
-            return key.trim().to_string();
-        }
-    }
-    String::new()
-}
-
-pub fn set_api_key(key: &str) {
-    let key = key.trim().to_string();
-    // SAFETY: single-threaded bootstrap / UI thread; no other thread reads these concurrently.
-    unsafe {
-        std::env::set_var("DEEPSEEK_API_KEY", &key);
-        std::env::set_var("SAIL_API_KEY", &key);
-    }
-    update(|s| {
-        s.deepseek_api_key = key.clone();
-    });
+    [s.deepseek_api_key, s.gemini_api_key]
+        .into_iter()
+        .map(|k| k.trim().to_string())
+        .find(|k| !k.is_empty())
+        .unwrap_or_default()
 }
 
 pub fn base_url() -> String {
-    for var in ["DEEPSEEK_BASE_URL", "SAIL_BASE_URL", "OPENAI_BASE_URL"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.trim().is_empty() {
-                return v.trim().to_string();
-            }
-        }
-    }
-    let url = get().base_url;
-    if url.trim().is_empty() {
-        DEFAULT_BASE_URL.into()
-    } else {
-        url
-    }
-}
-
-pub fn model() -> String {
-    let m = get().ai_model;
-    if m.trim().is_empty() {
-        DEFAULT_MODEL.into()
-    } else {
-        m
-    }
-}
-
-pub const MIC_MODES: &[(&str, &str)] = &[
-    ("always_open", "Always-Open Microphone — continuous hands-free VAD"),
-    ("push_to_talk", "Push-to-Talk — hold the key while speaking"),
-    ("click", "Click-to-Talk — click to start and stop"),
-];
-
-pub const BODY_FRAMINGS: &[(&str, &str)] = &[
-    ("full", "Full body — head to toe"),
-    ("half", "Half body — waist up"),
-    ("face", "Face and portrait — close-up"),
-];
-
-pub const STAGE_LIGHTING: &[(&str, &str)] = &[
-    ("auto", "Auto — synced to time of day"),
-    ("day", "Crisp daylight"),
-    ("dawn", "Soft rose dawn"),
-    ("sunset", "Golden amber sunset"),
-    ("night", "Cyberpunk neon night"),
-];
-
-// TODO(wire-up): scale presets will drive the Control Center slider ticks.
-#[allow(dead_code)]
-pub const AVATAR_SCALE_PRESETS: &[f32] = &[0.75, 1.0, 1.25, 1.5, 2.0];
-
-/// Personas shift their mood autonomously, so the effective person is mood-driven.
-pub fn current_persona() -> String {
-    crate::mood::current_persona()
-}
-
-pub fn persona_profile() -> &'static Persona {
-    persona(&current_persona())
-}
-
-pub fn system_instruction() -> String {
-    let p = persona_profile();
-    format!(
-        "{}\n{}{}",
-        p.system_prompt,
-        BASE_CAPABILITIES_PROMPT,
-        crate::mood::mood_note()
-    )
-}
-
-/// Sprinkles persona flavour on the active persona's lines (~28% of the time).
-pub fn flav(base: &str) -> String {
-    flavor_with(base, None, 0.28)
-}
-
-/// Sprinkles persona flavour on ~28% of lines so dialogue never feels repetitive.
-pub fn flavor(base: &str, persona_key: Option<&str>) -> String {
-    flavor_with(base, persona_key, 0.28)
-}
-
-pub fn flavor_with(base: &str, persona_key: Option<&str>, chance: f32) -> String {
-    let text = base.trim().to_string();
-    if text.is_empty() {
-        return text;
-    }
-    let profile = persona(persona_key.unwrap_or(&current_persona()));
-    let mut out = text;
-    let starts_flat = [
-        "hmph", "b-baka", "hehe", "yo ", "hey", "whoa", "oh", "<", "*",
-    ]
-    .iter()
-    .any(|w| out.to_lowercase().starts_with(w));
-
-    if rand::random::<f32>() < chance * 0.8 && !starts_flat {
-        let prefix = pick(profile.prefixes);
-        let mut chars = out.chars();
-        let lowered = match chars.next() {
-            Some(c) => c.to_lowercase().chain(chars).collect::<String>(),
-            None => out.clone(),
-        };
-        out = format!("{prefix}{lowered}");
-    }
-
-    if rand::random::<f32>() < chance && out.ends_with(['.', '!']) {
-        let suffix = pick(profile.suffixes);
-        out.pop();
-        out.push_str(suffix);
-    }
-    out
-}
-
-fn pick(options: &[&'static str]) -> &'static str {
-    use rand::seq::IndexedRandom;
-    options
-        .choose(&mut rand::rng())
-        .copied()
-        .unwrap_or_default()
+    first_env(&["DEEPSEEK_BASE_URL", "SAIL_BASE_URL", "OPENAI_BASE_URL"]).unwrap_or_else(|| get().base_url)
 }
 
 #[cfg(test)]
@@ -645,18 +371,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_persona_is_resolvable_and_flavoured() {
-        for p in PERSONAS {
-            assert_eq!(persona(p.key).key, p.key);
-            assert!(!p.prefixes.is_empty() && !p.suffixes.is_empty());
-        }
-        // Unknown keys must fall back instead of panicking.
-        assert_eq!(persona("nope").key, "tsundere");
+    fn clamping_repairs_bad_values() {
+        let mut s = Settings {
+            mic_mode: "telepathy".into(),
+            reasoning: "galaxy-brain".into(),
+            body_framing: "".into(),
+            avatar_scale: 40.0,
+            base_url: " ".into(),
+            ..Settings::default()
+        };
+        s.clamp();
+        assert_eq!(s.mic_mode, "click");
+        assert_eq!(s.reasoning, "auto");
+        assert_eq!(s.body_framing, "full");
+        assert_eq!(s.avatar_scale, 2.5);
+        assert_eq!(s.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
-    fn flavour_keeps_text_meaningful() {
-        let out = flavor("A perfectly ordinary sentence.", Some("tsundere"));
-        assert!(out.to_lowercase().contains("ordinary sentence"));
+    fn old_settings_files_still_load() {
+        // A file from before `reasoning`, `cua_enabled` and `idle_events_enabled` existed.
+        let s: Settings = serde_json::from_str(r#"{"mic_mode":"always_open","ai_model":"x"}"#).unwrap();
+        assert_eq!(s.mic_mode, "always_open");
+        assert_eq!(s.reasoning, "auto");
+        assert!(s.cua_enabled && s.idle_events_enabled);
     }
 }

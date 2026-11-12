@@ -117,10 +117,9 @@ impl Hearts {
                     if out_a <= 0.0 {
                         continue;
                     }
-                    for c in 0..3 {
-                        let blended =
-                            (h.tint[c] * a + dst[c] as f32 * da * (1.0 - a)) / out_a;
-                        dst[c] = blended.clamp(0.0, 255.0) as u8;
+                    for (channel, tint) in dst.iter_mut().zip(h.tint) {
+                        let blended = (tint * a + *channel as f32 * da * (1.0 - a)) / out_a;
+                        *channel = blended.clamp(0.0, 255.0) as u8;
                     }
                     dst[3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
                 }
@@ -142,7 +141,7 @@ mod tests {
         let mut frame = vec![0u8; (w * h * 4) as usize];
         hearts.step(0.3);
         hearts.paint(&mut frame, w, h);
-        assert!(frame.chunks_exact(4).any(|p| p[3] > 200), "hearts should be visible");
+        assert!(frame.as_chunks::<4>().0.iter().any(|p| p[3] > 200), "hearts should be visible");
         for _ in 0..60 {
             hearts.step(0.1);
         }

@@ -40,6 +40,8 @@ pub struct AvatarState {
     pub peeking: PeekSide,
     pub music_active: bool,
     pub music_energy: f32,
+    /// A beat measurement waiting for the animator's beat clock.
+    pub music_sync: Option<crate::animator::BeatSync>,
     pub props: BTreeMap<String, bool>,
     pub lighting: String,
     pub framing: String,
@@ -87,6 +89,7 @@ impl Default for AvatarState {
             peeking: PeekSide::None,
             music_active: false,
             music_energy: 0.0,
+            music_sync: None,
             props: BTreeMap::new(),
             lighting: "auto".into(),
             framing: "full".into(),
@@ -119,12 +122,13 @@ impl AvatarState {
         }
     }
 
-    /// 30 FPS at rest and 45 while something is moving. The app's requested rate is the base; the
-    /// boost only applies at the normal (30+) rate, never in game mode.
+    /// 30 FPS at rest and 60 while something is moving: walking, dancing, talking, a gesture
+    /// blending in. The app's requested rate is the base; the boost only applies at the normal
+    /// (30+) rate, never in game mode.
     pub fn effective_fps(&self) -> u32 {
-        let busy = self.talking || self.busy || self.headpat_active > 0.0;
+        let busy = self.talking || self.busy || self.headpat_active > 0.0 || self.music_active;
         if self.fps >= 30 && busy {
-            self.fps.max(45)
+            self.fps.max(60)
         } else {
             self.fps
         }
@@ -136,11 +140,12 @@ impl AvatarState {
     }
 
     /// The emotion to act out: an explicit one wins, otherwise speech and music fill the silence.
-    fn current_emote(&self) -> Emote {
+    /// The flag says the music filled it in (the animator then picks dance or groove by loudness).
+    fn current_emote(&self) -> (Emote, bool) {
         match self.emote {
-            Emote::Idle if self.talking => Emote::Talking,
-            Emote::Idle if self.music_active => Emote::Groove,
-            emote => emote,
+            Emote::Idle if self.talking => (Emote::Talking, false),
+            Emote::Idle if self.music_active => (Emote::Groove, true),
+            emote => (emote, false),
         }
     }
 }
@@ -327,19 +332,24 @@ pub fn animate(
     s.drift = (animator.motion.velocity / 1.5).clamp(Vec2::splat(-1.0), Vec2::splat(1.0));
 
     // ---- Animate ----------------------------------------------------------------------------
+    let sync = s.music_sync.take();
     let frame = s.rig.as_ref().zip(s.root).map(|(rig, root)| {
         let speech = if s.mouth_age < MOUTH_FRESH_SECS {
             Speech { aa: s.mouth_aa, oh: s.mouth_oh }
         } else {
             Speech::default()
         };
+        let (emote, music_fill) = s.current_emote();
         let input = Input {
-            emote: s.current_emote(),
+            emote,
             style: s.style,
             mode: s.body,
             look: s.smoothed_look,
             speech,
+            // Without music, dancing on request goes full out.
             music: if s.music_active { s.music_energy } else { 1.0 },
+            music_fill,
+            sync,
             headpat: s.headpat_active,
             peeking: s.peeking,
         };
@@ -394,19 +404,19 @@ mod tests {
     #[test]
     fn speech_and_music_only_fill_in_for_idle() {
         let mut state = AvatarState::default();
-        assert_eq!(state.current_emote(), Emote::Idle);
+        assert_eq!(state.current_emote(), (Emote::Idle, false));
         state.music_active = true;
-        assert_eq!(state.current_emote(), Emote::Groove);
+        assert_eq!(state.current_emote(), (Emote::Groove, true), "music fills the silence");
         state.talking = true;
-        assert_eq!(state.current_emote(), Emote::Talking, "speech beats music");
+        assert_eq!(state.current_emote(), (Emote::Talking, false), "speech beats music");
         state.emote = Emote::Sad;
-        assert_eq!(state.current_emote(), Emote::Sad, "an explicit emotion beats both");
+        assert_eq!(state.current_emote(), (Emote::Sad, false), "an explicit emotion beats both");
     }
 
     #[test]
     fn the_frame_rate_boost_needs_the_normal_rate() {
         let mut state = AvatarState { busy: true, ..default() };
-        assert_eq!(state.effective_fps(), 45);
+        assert_eq!(state.effective_fps(), 60);
         state.fps = 10;
         assert_eq!(state.effective_fps(), 10, "game mode stays slow");
         state.fps = 0;

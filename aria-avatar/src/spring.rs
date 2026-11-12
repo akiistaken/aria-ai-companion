@@ -20,6 +20,13 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Perlin's smootherstep of `t` in `0..1`: zero velocity *and* acceleration at both ends, so a
+/// blend starts and lands without a visible kick.
+pub fn smootherstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
 /// Ease-out with a little overshoot past 1, the snap anime poses settle with.
 pub fn ease_out_back(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0) - 1.0;
@@ -30,7 +37,8 @@ pub fn ease_out_back(t: f32) -> f32 {
 /// A single bump: 0 at both ends of `0..1`, 1 in the middle.
 pub fn bump(t: f32) -> f32 {
     if (0.0..=1.0).contains(&t) {
-        (t * PI).sin()
+        // `sin(π)` is a hair below zero in floating point; a bump never goes negative.
+        (t * PI).sin().max(0.0)
     } else {
         0.0
     }

@@ -370,10 +370,6 @@ pub fn facts() -> Vec<Fact> {
     load().facts
 }
 
-pub fn fact_texts() -> Vec<String> {
-    load().facts.into_iter().map(|f| f.fact).collect()
-}
-
 pub fn todos() -> Vec<Todo> {
     load().todos
 }

@@ -5,9 +5,16 @@
 //! the handle up through [`with_app`], which is only valid on the UI thread.
 //!
 //! The behaviour lives in child modules, all operating on the shared [`AppHandle`]:
-//! [`chat`] (speech, bubble, mic, prompts), [`body`] (geometry, walking, dragging, the avatar
-//! slot), [`physics`] (gravity, walking and jumping, as pure logic), [`ticks`] (every timer), [`menus`] (buttons, hotkeys, menu, dial), [`avatar`] (the
-//! renderer process and touch reactions) and [`studio`] (the Control Center).
+//!
+//! | Module | What |
+//! |---|---|
+//! | `chat` | speech, the bubble, the microphone modes, prompts, the last-chat recall |
+//! | `body` | geometry, walking, dragging, edge snap, peeking, the avatar slot and hit region |
+//! | `physics` | gravity, walking and jumping, as pure logic |
+//! | `ticks` | every timer: motion, proactive events, idle events, music, game dodge |
+//! | `menus` | mascot buttons, global hotkeys, the context menu and the quick dial |
+//! | `avatar` | the renderer process, its events, and touch reactions |
+//! | `studio` | the Control Center |
 
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, PhysicalPosition};
@@ -16,10 +23,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::brain::brain;
 use crate::config;
 
-slint::include_modules!();
+pub use aria_ui::*;
 
 mod avatar;
 mod body;
@@ -70,6 +76,11 @@ pub struct App {
     pub pre_game_pos: Option<(i32, i32)>,
     pub last_copilot_vision: Instant,
     pub busy: bool,
+    /// The last real line she said and its emotion; a click on her shows it again.
+    pub last_chat: Option<(String, String)>,
+    /// When the next idle event may happen, and the last few she did (so the AI varies them).
+    pub next_idle_event: Instant,
+    pub recent_idle: Vec<String>,
     pub full_bubble_text: String,
     pub typed: usize,
     pub bubble_hide_at: Option<Instant>,
@@ -85,7 +96,7 @@ pub struct App {
     /// True while the cursor is over the avatar model (drives click-through).
     pub over_model: bool,
     /// Window size, stage hole and bar visibility the mascot's hit region was last cut for.
-    pub region_key: Option<(i32, i32, (i32, i32, i32, i32), bool)>,
+    pub region_key: Option<(i32, i32, crate::desktop::win32::Rect, bool)>,
     /// Bubble slot height the window was last laid out for (logical px).
     pub bubble_slot: f32,
     /// Owned so they are dropped (and stopped) with the app instead of leaked.
@@ -94,11 +105,13 @@ pub struct App {
 
 pub type AppHandle = Rc<RefCell<App>>;
 
+/// UI work queued while another mutation was running.
+type Deferred = Box<dyn FnOnce(&AppHandle)>;
+
 thread_local! {
+    static CURRENT: RefCell<Option<AppHandle>> = const { RefCell::new(None) };
+}
 
-static CURRENT: RefCell<Option<AppHandle>> =
-
-const { RefCell::new(None) };}
 pub fn set_current(handle: &AppHandle) {
     CURRENT.with(|slot| *slot.borrow_mut() = Some(handle.clone()));
 }
@@ -117,7 +130,7 @@ thread_local! {
 
     /// Work that arrived while a mutation was in flight. Draining happens once the outer
     /// mutation finishes, so nested callbacks are deferred rather than silently dropped.
-    static DEFERRED: RefCell<Vec<Box<dyn FnOnce(&AppHandle)>>> = const { RefCell::new(Vec::new()) };
+    static DEFERRED: RefCell<Vec<Deferred>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Runs `f` with exclusive access to the app.
@@ -241,6 +254,9 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         pre_game_pos: None,
         last_copilot_vision: Instant::now(),
         busy: false,
+        last_chat: None,
+        next_idle_event: Instant::now() + Duration::from_secs(90),
+        recent_idle: Vec::new(),
         full_bubble_text: String::new(),
         typed: 0,
         bubble_hide_at: None,
@@ -262,6 +278,7 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
     apply_persona(&app);
     setup_window(&app);
     install_hotkeys();
+    apply_mic_settings();
     attach_stage(&app);
     start_timers(&app);
     greeting(&app);

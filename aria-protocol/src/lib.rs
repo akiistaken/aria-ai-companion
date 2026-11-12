@@ -58,6 +58,8 @@ pub enum BodyMode {
 pub const EMOTIONS: &[&str] = &[
     "idle", "talking", "happy", "laugh", "angry", "annoyed", "sad", "cry", "thinking",
     "surprised", "shy", "dizzy", "sleepy", "dance", "groove", "sit", "wave",
+    // Idle moments: short things she does on her own.
+    "stretch", "look_around", "hum", "twirl", "fix_hair", "clap",
 ];
 
 /// Commands sent from the app to the avatar renderer.
@@ -78,7 +80,17 @@ pub enum Command {
     /// Lip-sync envelope, `0..1`.
     SetMouth { aa: f32, oh: f32 },
     SetPeeking { side: PeekSide },
-    SetMusicVibe { active: bool, energy: f32 },
+    /// Music she can hear. `bpm` is the tempo (0 when unknown) and `beat` where in the beat the
+    /// music was when this was sent (0 on the beat, rising to 1); the renderer runs its own beat
+    /// clock from them so her steps land in time.
+    SetMusicVibe {
+        active: bool,
+        energy: f32,
+        #[serde(default)]
+        bpm: f32,
+        #[serde(default)]
+        beat: f32,
+    },
     TriggerHeadpat,
     SetProps { props: BTreeMap<String, bool> },
     /// `auto` | `day` | `dawn` | `sunset` | `night`.
@@ -151,6 +163,8 @@ pub enum Event {
     DragStart,
     DragMove,
     DragEnd,
+    /// One left click on the model (sent once the double-click window has passed).
+    Click,
     /// Double-click on the model.
     Poke,
     Shake,
@@ -237,6 +251,21 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn music_vibe_without_a_beat_still_parses() {
+        let line = r#"{"kind":"set_music_vibe","data":{"active":true,"energy":0.5}}"#;
+        match serde_json::from_str::<Command>(line).expect("parses") {
+            Command::SetMusicVibe { active, bpm, beat, .. } => assert!(active && bpm == 0.0 && beat == 0.0),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emotion_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        assert!(EMOTIONS.iter().all(|e| seen.insert(*e)));
     }
 
     #[test]

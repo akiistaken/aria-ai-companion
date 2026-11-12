@@ -240,8 +240,9 @@ impl AvatarLink {
         self.send(Command::SetPeeking { side: peek });
     }
 
-    pub fn set_music_vibe(&self, active: bool, energy: f32) {
-        self.send(Command::SetMusicVibe { active, energy });
+    /// Music she hears: loudness, tempo (0 = unknown) and the beat phase right now.
+    pub fn set_music_vibe(&self, active: bool, energy: f32, bpm: f32, beat: f32) {
+        self.send(Command::SetMusicVibe { active, energy, bpm, beat });
     }
 
     pub fn trigger_headpat(&self) {
@@ -268,7 +269,7 @@ impl AvatarLink {
 
     /// 30 normally, 10 in game mode, 0 to pause rendering entirely. Only sent on change.
     pub fn set_fps(&self, fps: u32) {
-        if !self.changed(|last| std::mem::replace(&mut last.fps, Some(fps)) != Some(fps)) {
+        if !self.changed(|last| last.fps.replace(fps) != Some(fps)) {
             return;
         }
         self.send(Command::SetFps { fps });
@@ -302,7 +303,7 @@ impl AvatarLink {
         if hwnd == 0 {
             return;
         }
-        crate::win32::set_click_through(hwnd as isize, enabled);
+        crate::desktop::win32::set_click_through(hwnd as isize, enabled);
         self.send(Command::SetClickThrough { enabled });
     }
 
@@ -332,7 +333,7 @@ impl AvatarLink {
             return;
         }
         let rect = (x, y, width as u32, height as u32);
-        if !self.changed(|last| std::mem::replace(&mut last.rect, Some(rect)) != Some(rect)) {
+        if !self.changed(|last| last.rect.replace(rect) != Some(rect)) {
             return;
         }
         self.send(Command::SetWindowRect {
@@ -525,7 +526,7 @@ fn spawn_renderer(shared: &Shared) -> bool {
         Ok(mut child) => {
             log::info!("spawned avatar renderer pid={}", child.id());
             // The renderer must die with the app, even if this process is killed.
-            crate::win32::put_in_kill_on_close_job(&mut child);
+            crate::desktop::win32::put_in_kill_on_close_job(&mut child);
             *shared.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
             true
         }

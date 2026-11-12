@@ -3,11 +3,11 @@
 use super::*;
 
 pub(crate) fn headpat(app: &AppHandle) {
-    crate::mood::note_event("headpat");
+    crate::persona::mood::note_event("headpat");
     let stat = crate::memory::adjust_emotion("dere", 5);
     crate::memory::adjust_emotion("devotion", 2);
     app.borrow().stage.trigger_headpat();
-    let line = crate::reactions::pick(&config::current_persona(), "headpat", 0.35);
+    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "headpat", 0.35);
     say(
         app,
         &line,
@@ -22,9 +22,9 @@ pub(crate) fn headpat(app: &AppHandle) {
 }
 
 pub(crate) fn poke(app: &AppHandle) {
-    crate::mood::note_event("poke");
+    crate::persona::mood::note_event("poke");
     let stat = crate::memory::adjust_emotion("tsun", 5);
-    let line = crate::reactions::pick(&config::current_persona(), "poke", 0.32);
+    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "poke", 0.32);
     say(
         app,
         &line,
@@ -36,10 +36,10 @@ pub(crate) fn poke(app: &AppHandle) {
 }
 
 pub(crate) fn shake(app: &AppHandle) {
-    crate::mood::note_event("shake");
+    crate::persona::mood::note_event("shake");
     crate::memory::adjust_emotion("tsun", 4);
     let stat = crate::memory::adjust_emotion("hype", 3);
-    let line = crate::reactions::pick(&config::current_persona(), "shake", 0.32);
+    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "shake", 0.32);
     say(
         app,
         &line,
@@ -96,7 +96,7 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
                 stage.set_body(a.body.mode);
                 stage.set_mood(&a.persona);
                 stage.set_peeking(&a.peeking);
-                stage.set_music_vibe(a.music_vibing, 0.6);
+                stage.set_music_vibe(a.music_vibing, 0.6, 0.0, 0.0);
             }
             apply_render_policy(app);
             layout_windows(app);
@@ -117,10 +117,12 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             if !app.borrow().dragging {
                 start_drag(app);
             }
-            let cursor = crate::input::cursor_position();
+            let cursor = crate::desktop::input::cursor_position();
             update_drag(app, cursor);
         }
         Event::DragEnd => end_drag(app),
+        // One click brings back what she last said.
+        Event::Click => show_last_chat(app),
         Event::Poke => poke(app),
         Event::Shake => shake(app),
         Event::Headpat => headpat(app),
