@@ -29,7 +29,7 @@ static RECORDING: AtomicBool = AtomicBool::new(false);
 pub use lipsync::mouth_levels;
 pub use mic::{start_recording, stop_recording_wav};
 pub use stt::transcribe_wav;
-pub use tts::{precache, speak_async};
+pub use tts::speak_async;
 
 /// True while her voice is actually playing.
 pub fn is_speaking() -> bool {

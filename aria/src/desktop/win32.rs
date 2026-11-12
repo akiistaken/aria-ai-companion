@@ -546,21 +546,18 @@ pub fn session_locked() -> bool {
     win.exe.eq_ignore_ascii_case("LockApp.exe")
 }
 
-/// Gives a window a hit/paint region of its full rect minus some holes `(x, y, w, h)`, in window
-/// pixels. Clicks inside a hole fall through to whatever is underneath.
-pub fn set_region_with_holes(hwnd: isize, width: i32, height: i32, holes: &[Rect]) {
-    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF};
-    if hwnd == 0 || width <= 0 || height <= 0 {
-        return;
-    }
+/// Restricts painting and input to visible chrome rectangles. An empty list is click-through.
+pub fn set_region_rects(hwnd: isize, rects: &[Rect]) {
+    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
+    if hwnd == 0 { return; }
     unsafe {
-        let full = CreateRectRgn(0, 0, width, height);
-        for hole in holes.iter().filter(|h| h.2 > 0 && h.3 > 0) {
-            let cut = CreateRectRgn(hole.0, hole.1, hole.0 + hole.2, hole.1 + hole.3);
-            CombineRgn(Some(full), Some(full), Some(cut), RGN_DIFF);
-            let _ = DeleteObject(cut.into());
+        let full = CreateRectRgn(0, 0, 0, 0);
+        for rect in rects.iter().filter(|r| r.2 > 0 && r.3 > 0) {
+            let part = CreateRectRgn(rect.0, rect.1, rect.0 + rect.2, rect.1 + rect.3);
+            CombineRgn(Some(full), Some(full), Some(part), RGN_OR);
+            let _ = DeleteObject(part.into());
         }
-        // On success the system owns `full`; it must not be deleted here.
+        // On success the system owns the region.
         if SetWindowRgn(HWND(hwnd as *mut _), Some(full), true) == 0 {
             let _ = DeleteObject(full.into());
         }

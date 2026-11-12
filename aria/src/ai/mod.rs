@@ -9,9 +9,8 @@
 //! | [`tasks`] | one-shot jobs: clipboard diagnosis, audio, visual grounding, proactive lines, idle events |
 //! | [`facts`] | picking personal facts out of what the user says |
 //!
-//! There is no offline mode: every reply comes from the endpoint. Without an API key she says
-//! so and points at the Control Center. Instant touch reactions (poke, head-pat) stay scripted
-//! because they answer a gesture in the same frame.
+//! Chat, greetings and touch reactions all use the configured endpoint. Gestures can still
+//! animate offline; background speech stays silent when generation is unavailable.
 
 pub mod brain;
 pub mod client;

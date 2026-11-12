@@ -68,7 +68,6 @@ pub struct App {
     pub peeking: String,
     pub user_placed: bool,
     pub stationary_since: Instant,
-    pub roaming: bool,
     pub clipboard_watch: bool,
     pub last_clipboard: String,
     pub game_compacted: bool,
@@ -76,6 +75,8 @@ pub struct App {
     pub pre_game_pos: Option<(i32, i32)>,
     pub last_copilot_vision: Instant,
     pub busy: bool,
+    pub reaction_pending: bool,
+    pub speech_generation: u64,
     /// The last real line she said and its emotion; a click on her shows it again.
     pub last_chat: Option<(String, String)>,
     /// When the next idle event may happen, and the last few she did (so the AI varies them).
@@ -96,7 +97,7 @@ pub struct App {
     /// True while the cursor is over the avatar model (drives click-through).
     pub over_model: bool,
     /// Window size, stage hole and bar visibility the mascot's hit region was last cut for.
-    pub region_key: Option<(i32, i32, crate::desktop::win32::Rect, bool)>,
+    pub region_key: Option<(i32, i32, Vec<crate::desktop::win32::Rect>)>,
     /// Bubble slot height the window was last laid out for (logical px).
     pub bubble_slot: f32,
     /// Owned so they are dropped (and stopped) with the app instead of leaked.
@@ -246,7 +247,6 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         peeking: "none".into(),
         user_placed: false,
         stationary_since: Instant::now(),
-        roaming: true,
         clipboard_watch: true,
         last_clipboard: String::new(),
         game_compacted: false,
@@ -257,6 +257,8 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         last_chat: None,
         next_idle_event: Instant::now() + Duration::from_secs(90),
         recent_idle: Vec::new(),
+        reaction_pending: false,
+        speech_generation: 0,
         full_bubble_text: String::new(),
         typed: 0,
         bubble_hide_at: None,

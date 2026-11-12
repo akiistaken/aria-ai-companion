@@ -18,7 +18,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use crate::behaviors::AvatarState;
-use crate::rig::{Bone, Rig};
+use crate::rig::{Bone, Rig, Side};
+use crate::pose::{hand_aim, HandShape, Pose};
 
 /// The root entity of one prop; its visibility follows `AvatarState::props`.
 #[derive(Component)]
@@ -33,8 +34,6 @@ pub enum PropAnim {
     WitchHat,
     FoxTail,
     Sword,
-    Mug,
-    Phone,
 }
 
 fn euler(x: f32, y: f32, z: f32) -> Quat {
@@ -89,6 +88,36 @@ fn torus(radius: f32, tube: f32, radial: u32, tubular: u32, arc: f32) -> Mesh {
 
 fn cone(radius: f32, height: f32, segments: u32) -> Mesh {
     Cone { radius, height }.mesh().resolution(segments).build()
+}
+
+/// A continuous bent hat crown. Separate overlapping cones exposed their bottom caps and
+/// looked like a detached tip; shared rings keep the silhouette joined all the way up.
+fn hat_crown() -> Mesh {
+    let rings = [(0.0, 0.0, 0.115), (0.12, 0.0, 0.065), (0.23, -0.025, 0.027), (0.29, -0.07, 0.0)];
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    const SEGMENTS: usize = 32;
+    for (j, &(y, z, radius)) in rings.iter().enumerate() {
+        let (y0, z0, r0) = rings[j.saturating_sub(1)];
+        let (y1, z1, r1) = rings[(j + 1).min(rings.len() - 1)];
+        for i in 0..=SEGMENTS {
+            let angle = TAU * i as f32 / SEGMENTS as f32;
+            let (sin, cos) = angle.sin_cos();
+            positions.push([radius * cos, y, z + radius * sin]);
+            let slope = (r0 - r1 - sin * (z1 - z0)) / (y1 - y0);
+            normals.push(Vec3::new(cos, slope, sin).normalize().to_array());
+            if j > 0 && i > 0 {
+                let a = (j * (SEGMENTS + 1) + i) as u32;
+                let b = a - (SEGMENTS + 1) as u32;
+                indices.extend_from_slice(&[a - 1, a, b, a - 1, b, b - 1]);
+            }
+        }
+    }
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 fn cylinder(top: f32, bottom: f32, height: f32, segments: u32) -> Mesh {
@@ -171,7 +200,8 @@ impl Builder<'_, '_, '_> {
 
 /// Spawns the normalized attachment frame for a bone, if the model has it.
 fn frame(b: &mut Builder, rig: &Rig, bones: &[Bone]) -> Option<Entity> {
-    let (bone, transform) = bones.iter().find_map(|bone| rig.attachment_frame(*bone))?;
+    let (bone, mut transform) = bones.iter().find_map(|bone| rig.attachment_frame(*bone))?;
+    transform.scale *= rig.metrics.unit;
     Some(b.group(bone, transform))
 }
 
@@ -232,8 +262,7 @@ pub fn build_props(
         let hat = b.group(hat_root, at_rot([0.0, 0.18, 0.01], [-0.12, 0.0, -0.06]));
         b.commands.entity(hat).insert(PropAnim::WitchHat);
         b.part(hat, cylinder(0.185, 0.19, 0.007, 32), &hat_mat, Transform::IDENTITY);
-        b.part(hat, cone(0.115, 0.14, 24), &hat_mat, at(0.0, 0.07, 0.0));
-        b.part(hat, cone(0.065, 0.13, 20), &hat_mat, at_rot([0.0, 0.18, -0.025], [-0.35, 0.0, 0.0]));
+        b.part(hat, hat_crown(), &hat_mat, Transform::IDENTITY);
         b.part(hat, torus(0.105, 0.009, 8, 30, TAU), &ribbon_mat, at_rot([0.0, 0.012, 0.0], [PI * 0.5, 0.0, 0.0]));
 
         // 6. Shades.
@@ -311,14 +340,14 @@ pub fn build_props(
         let mug_root = b.prop(right_hand, "coffee_mug", Transform::IDENTITY);
         let mug_mat = b.mat(material(0xf8fafc, 0.2, 0.1, None));
         let coffee = b.mat(material(0x3e2723, 0.4, 0.0, None));
-        let mug = b.group(mug_root, at_rot([0.035, 0.035, 0.025], [0.2, 0.0, -0.4]));
-        b.commands.entity(mug).insert(PropAnim::Mug);
+        let grip_rotation = Quat::from_mat3(&Mat3::from_cols(Vec3::Z, Vec3::NEG_X, Vec3::NEG_Y));
+        let mug = b.group(mug_root, at(-0.045, -0.01, -0.033).with_rotation(grip_rotation));
         b.part(mug, cylinder(0.024, 0.022, 0.054, 16), &mug_mat, Transform::IDENTITY);
         b.part(mug, cylinder(0.021, 0.021, 0.005, 16), &coffee, at(0.0, 0.023, 0.0));
-        b.part(mug, torus(0.016, 0.004, 8, 16, PI), &mug_mat, at_rot([0.026, 0.0, 0.0], [0.0, 0.0, PI * 0.5]));
+        b.part(mug, torus(0.016, 0.004, 8, 16, PI), &mug_mat, at_rot([0.026, 0.0, 0.0], [0.0, 0.0, -PI * 0.5]));
 
         // 12. Game controller.
-        let pad = b.prop(right_hand, "game_controller", at_rot([0.045, 0.045, 0.035], [0.4, 0.2, -0.3]));
+        let pad = b.prop(right_hand, "game_controller", at(-0.04, -0.015, 0.0).with_rotation(grip_rotation));
         let body = b.mat(material(0x0f172a, 0.35, 0.7, None));
         let led = b.mat(material(0x38bdf8, 1.0, 0.0, Some((0x0284c7, 1.2))));
         let btn = b.mat(material(0xf43f5e, 1.0, 0.0, Some((0xe11d48, 0.8))));
@@ -333,8 +362,8 @@ pub fn build_props(
         let phone_root = b.prop(left_hand, "smartphone", Transform::IDENTITY);
         let chassis = b.mat(material(0x020617, 0.2, 0.9, None));
         let screen = b.mat(material(0x38bdf8, 0.1, 0.0, Some((0x0284c7, 0.95))));
-        let phone = b.group(phone_root, at_rot([-0.035, 0.035, 0.03], [0.4, -0.3, 0.5]));
-        b.commands.entity(phone).insert(PropAnim::Phone);
+        let grip_rotation = Quat::from_mat3(&Mat3::from_cols(Vec3::NEG_Z, Vec3::X, Vec3::NEG_Y));
+        let phone = b.group(phone_root, at(0.04, -0.018, 0.0).with_rotation(grip_rotation));
         b.part(phone, Cuboid::new(0.038, 0.072, 0.0045).into(), &chassis, Transform::IDENTITY);
         b.part(phone, Cuboid::new(0.034, 0.066, 0.001).into(), &screen, at(0.0, 0.0, 0.0028));
     }
@@ -343,7 +372,8 @@ pub fn build_props(
 /// Shows exactly the props the app has switched on.
 pub fn sync_visibility(state: Res<AvatarState>, mut props: Query<(&Prop, &mut Visibility)>) {
     for (prop, mut visibility) in props.iter_mut() {
-        let on = state.props.get(prop.0).copied().unwrap_or(false);
+        let on = state.props.get(prop.0).copied().unwrap_or(false)
+            && !(prop.0 == "coffee_mug" && state.props.get("game_controller").copied().unwrap_or(false));
         let wanted = if on { Visibility::Inherited } else { Visibility::Hidden };
         if *visibility != wanted {
             *visibility = wanted;
@@ -397,11 +427,52 @@ pub fn animate_props(
             PropAnim::Sword => {
                 transform.rotation = euler(0.15, 0.18 + (t * 1.5).sin() * 0.04, 0.72);
             }
-            PropAnim::Mug => {
-                transform.translation.y = 0.035 + (t * 2.5).sin() * 0.003;
-            }
-            PropAnim::Phone => {
-                transform.rotation = euler(0.4, -0.3, 0.5 + (t * 1.8).sin() * 0.03);
+        }
+    }
+}
+
+/// Occupied hands carry their objects at waist height and keep a stable grip. The offsets in
+/// the prop meshes use the same finger/palm axes; no bobbing is applied independently of a hand.
+pub fn hold_props(rig: &Rig, pose: &mut Pose, props: &std::collections::BTreeMap<String, bool>) {
+    let on = |key: &str| props.get(key).copied().unwrap_or(false);
+    let u = rig.metrics.unit;
+    let fk = rig.fk(pose);
+    for side in Side::BOTH {
+        let occupied = match side {
+            Side::Right => on("coffee_mug") || on("game_controller"),
+            Side::Left => on("smartphone"),
+        };
+        if !occupied { continue; }
+        let hips = fk.pos[Bone::Hips.index()];
+        let target = hips + Vec3::new(side.sign() * 0.17, 0.22, 0.22) * u;
+        pose.reach(rig, side, target, Vec3::new(side.sign(), -1.0, -0.3),
+            Some(hand_aim(side, Vec3::Y, Vec3::Z)));
+        let grip = if side == Side::Right && on("coffee_mug") && !on("game_controller") { 0.8 } else { 0.48 };
+        pose.fingers(side, HandShape::RELAXED.mix(HandShape::FIST, grip));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occupied_hands_keep_their_grip_when_the_torso_moves() {
+        let rig = Rig::synthetic(&[]);
+        let props = [("coffee_mug".into(), true), ("smartphone".into(), true)].into();
+        for lean in [-0.3, 0.0, 0.3] {
+            let mut pose = Pose::default();
+            pose.spine(lean, lean, lean);
+            hold_props(&rig, &mut pose, &props);
+            let fk = rig.fk(&pose);
+            for side in Side::BOTH {
+                let wrist = Bone::LeftHand.on(side).index();
+                let fingers = fk.rot[wrist] * Vec3::X * side.sign();
+                assert!(fingers.distance(Vec3::Y) < 1e-4, "objects stay upright");
+                let palm = fk.rot[wrist] * Vec3::NEG_Y;
+                assert!(palm.distance(Vec3::Z) < 1e-4);
+                let target = fk.pos[Bone::Hips.index()] + Vec3::new(side.sign() * 0.17, 0.22, 0.22) * rig.metrics.unit;
+                assert!(fk.pos[wrist].distance(target) < 0.01, "grip stays within reach");
             }
         }
     }

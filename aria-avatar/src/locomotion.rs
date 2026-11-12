@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use crate::face::Face;
 use crate::pose::{Arm, HandShape, Pose};
 use crate::rig::Side;
-use crate::spring::{approach_factor, smoothstep};
+use crate::spring::{approach_factor, smoothstep, smootherstep};
 
 /// Gravity, for turning a speed into a dimensionless gait speed.
 const GRAVITY: f32 = 9.81;
@@ -81,6 +81,7 @@ struct FootState {
     /// Which way the foot points, as a world yaw.
     yaw: f32,
     swing: Option<Swing>,
+    landed: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -134,12 +135,35 @@ pub struct Gait {
     /// Current stride (distance covered by one cycle) in metres.
     pub stride: f32,
     placed: bool,
+    stationary_for: f32,
 }
 
 /// Fraction of a cycle each foot spends on the ground.
 const DUTY: f32 = 0.62;
 /// Cycles per second used to finish or correct a step when distance is not driving the cycle.
 const SETTLE_RATE: f32 = 1.7;
+
+/// Smooth Hermite tracks through toe-off, early swing, passing, extension and heel strike.
+/// Monotone tangents avoid overshooting the floor while preserving velocity between keys.
+fn foot_track(keys: &[(f32, f32)], t: f32) -> f32 {
+    let slope = |i: usize| {
+        if i == 0 || i + 1 == keys.len() { return 0.0; }
+        let a = (keys[i].1 - keys[i - 1].1) / (keys[i].0 - keys[i - 1].0);
+        let b = (keys[i + 1].1 - keys[i].1) / (keys[i + 1].0 - keys[i].0);
+        if a * b <= 0.0 { 0.0 } else { (a + b).signum() * ((a + b).abs() * 0.5).min(3.0 * a.abs().min(b.abs())) }
+    };
+    let i = keys.windows(2).position(|pair| t <= pair[1].0).unwrap_or(keys.len() - 2);
+    let (x, a) = keys[i];
+    let (end, b) = keys[i + 1];
+    let span = end - x;
+    let u = ((t - x) / span).clamp(0.0, 1.0);
+    let (u2, u3) = (u * u, u * u * u);
+    (2.0 * u3 - 3.0 * u2 + 1.0) * a + (u3 - 2.0 * u2 + u) * span * slope(i)
+        + (-2.0 * u3 + 3.0 * u2) * b + (u3 - u2) * span * slope(i + 1)
+}
+
+const SWING_HEIGHT: &[(f32, f32)] = &[(0.0, 0.0), (0.14, 0.42), (0.42, 1.0), (0.68, 0.72), (0.86, 0.18), (1.0, 0.0)];
+const SWING_PITCH: &[(f32, f32)] = &[(0.0, 0.4), (0.16, 0.48), (0.42, 0.12), (0.68, -0.1), (0.86, -0.23), (1.0, -0.23)];
 
 impl Gait {
     /// Stride length for a speed: about 1.9 leg lengths times the square root of the Froude-style
@@ -167,6 +191,7 @@ impl Gait {
                 pos: Self::home(side, yaw, half_width),
                 yaw: yaw + side.sign() * toe_out,
                 swing: None,
+                landed: self.phase - DUTY * 0.5,
             };
         }
         self.placed = true;
@@ -178,7 +203,8 @@ impl Gait {
         }
         let leg = input.leg.max(0.05);
         let pace = Self::pace(input.speed, leg);
-        let moving = pace > 0.03;
+        self.stationary_for = if input.dx.abs() > 1e-5 { 0.0 } else { self.stationary_for + input.dt };
+        let moving = pace > 0.03 && self.stationary_for < 0.12;
         let stride = Self::stride_for(input.speed, leg);
         self.stride = stride;
         let direction = if input.speed >= 0.0 { 1.0 } else { -1.0 };
@@ -240,16 +266,17 @@ impl Gait {
                     foot.pos = target;
                     foot.yaw = target_yaw;
                     foot.swing = None;
+                    foot.landed = self.phase;
                 } else {
-                    let ease = smoothstep(0.0, 1.0, u);
+                    let ease = smootherstep(u);
                     foot.pos = swing.from.lerp(target, ease);
                     foot.yaw = swing.from_yaw + crate::spring::wrap_angle(target_yaw - swing.from_yaw) * ease;
                     out[i] = FootPose {
                         ground: foot.pos,
                         // Leaves the ground quickly and comes down gently.
-                        height: swing.lift * (PI * u.powf(0.8)).sin().max(0.0),
+                        height: swing.lift * foot_track(SWING_HEIGHT, u),
                         // Toes trail at lift-off and lead into the heel strike.
-                        pitch: reach * (0.55 - 0.9 * smoothstep(0.1, 0.8, u)),
+                        pitch: reach * foot_track(SWING_PITCH, u),
                         yaw: foot.yaw,
                         planted: false,
                     };
@@ -257,9 +284,9 @@ impl Gait {
                 }
             }
             // Planted: roll from the heel at the start of stance onto the ball at the end.
-            let stance = ((turn - swing_len) / DUTY).clamp(0.0, 1.0);
+            let stance = ((self.phase - foot.landed) / DUTY).clamp(0.0, 1.0);
             let roll = if moving {
-                reach * (0.5 * smoothstep(0.75, 1.0, stance) - 0.35 * (1.0 - smoothstep(0.0, 0.12, stance)))
+                reach * (0.4 * smoothstep(0.68, 1.0, stance) - 0.23 * (1.0 - smoothstep(0.0, 0.22, stance)))
             } else {
                 0.0
             };
@@ -504,6 +531,29 @@ mod tests {
         assert!(0.3 / slow < 1.2 / walk, "cadence rises too");
         assert_eq!(Gait::stride_for(0.0, LEG), 0.0);
         assert!(Gait::stride_for(50.0, LEG) <= 1.7 * LEG + 1e-6);
+    }
+
+    #[test]
+    fn swing_has_clearance_and_a_soft_landing() {
+        for i in 0..=1000 {
+            let u = i as f32 / 1000.0;
+            let height = foot_track(SWING_HEIGHT, u);
+            assert!((0.0..=1.001).contains(&height), "foot cannot penetrate ground: {height}");
+        }
+        assert!(foot_track(SWING_HEIGHT, 0.4) > 0.95);
+        assert!(foot_track(SWING_HEIGHT, 0.999) < 0.0001);
+        assert!((foot_track(SWING_PITCH, 1.0) + 0.23).abs() < 1e-5);
+    }
+
+    #[test]
+    fn stale_speed_cannot_keep_an_idle_foot_suspended() {
+        let mut gait = Gait::default();
+        for _ in 0..90 { gait.update(&input(0.9 / 60.0, 1.0 / 60.0, 0.9, 1.3)); }
+        for _ in 0..240 { gait.update(&input(0.0, 1.0 / 60.0, 0.9, 0.0)); }
+        let phase = gait.phase;
+        let feet = gait.update(&input(0.0, 1.0 / 60.0, 0.9, 0.0));
+        assert!(feet.iter().all(|f| f.planted && f.height == 0.0));
+        assert_eq!(phase, gait.phase);
     }
 
     /// A bent leg seen from the front looks straight unless something moves sideways, so the air

@@ -82,6 +82,7 @@ impl HandShape {
     pub const FIST: HandShape = HandShape { curl: [0.85, 1.0, 1.0, 1.0, 1.0], spread: 0.0 };
     pub const LOOSE_FIST: HandShape = HandShape { curl: [0.5, 0.72, 0.78, 0.82, 0.85], spread: 0.0 };
     pub const POINT: HandShape = HandShape { curl: [0.7, 0.0, 1.0, 1.0, 1.0], spread: 0.0 };
+    pub const PEACE: HandShape = HandShape { curl: [0.65, 0.03, 0.03, 0.92, 0.95], spread: 1.0 };
 
     /// Blends toward `other`.
     pub fn mix(self, other: HandShape, t: f32) -> HandShape {

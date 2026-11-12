@@ -577,6 +577,16 @@ pub fn wire_studio(studio: &ControlCenter) {
             active = !current;
             s.avatar_props
                 .insert(key.clone(), serde_json::json!(active));
+            if active {
+                let other = match key.as_str() {
+                    "coffee_mug" => Some("game_controller"),
+                    "game_controller" => Some("coffee_mug"),
+                    _ => None,
+                };
+                if let Some(other) = other {
+                    s.avatar_props.insert(other.into(), serde_json::json!(false));
+                }
+            }
         });
         with_app(|app| {
             crate::app::apply_avatar_settings(app);

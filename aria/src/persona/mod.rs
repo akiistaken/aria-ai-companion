@@ -1,8 +1,6 @@
-//! Who Aria is: the persona catalogue, the mood engine that picks between personas, the instant
-//! touch reactions, and the light "flavour" sprinkled on her lines.
+//! Who Aria is: the persona catalogue, the mood engine that picks between personas, and the light "flavour" sprinkled on her lines.
 
 pub mod mood;
-pub mod reactions;
 
 use rand::seq::IndexedRandom;
 

@@ -179,7 +179,7 @@ mod tests {
         for (name, moment) in moments {
             for step in 0..80 {
                 let e = step as f32 * 0.1;
-                let ctx = Ctx { rig: &rig, t: e + 3.0, e, style: Style::default(), talk: 0.0, energy: 0.0, beat: e * 2.0 };
+                let ctx = Ctx { rig: &rig, t: e + 3.0, e, style: Style::default(), talk: 0.0, energy: 0.0, beat: e * 2.0, bpm: 120.0 };
                 let act = moment(&ctx);
                 assert!(act.pose.rot.iter().all(|q| q.is_finite() && q.is_normalized()), "{name} at {e}s");
                 assert!(act.pose.hips.is_finite() && act.hop >= 0.0, "{name} at {e}s");
@@ -192,7 +192,7 @@ mod tests {
     fn the_stretch_goes_up_and_comes_back_down() {
         let rig = Rig::synthetic(&[]);
         let wrist_height = |e: f32| {
-            let ctx = Ctx { rig: &rig, t: e, e, style: Style::default(), talk: 0.0, energy: 0.0, beat: 0.0 };
+            let ctx = Ctx { rig: &rig, t: e, e, style: Style::default(), talk: 0.0, energy: 0.0, beat: 0.0, bpm: 120.0 };
             Landmarks::of(&rig, &stretch(&ctx).pose).pos(crate::rig::Bone::LeftHand).y
         };
         let head = rig.rest(crate::rig::Bone::Head).y;

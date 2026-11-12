@@ -19,7 +19,7 @@
 mod dance;
 mod moments;
 
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 
 use bevy::prelude::*;
 
@@ -282,6 +282,8 @@ pub struct Ctx<'a> {
     /// Beats counted by the animator's beat clock: whole numbers fall on the music's beats (or on
     /// her own tempo when nothing is playing). Dances and the groove run on this, not on `t`.
     pub beat: f32,
+    /// Smoothed tempo; scales the choreography and the listening expression.
+    pub bpm: f32,
 }
 
 impl Ctx<'_> {
@@ -471,29 +473,30 @@ fn talking(ctx: &Ctx) -> Act {
     let t = ctx.t;
     // With no voice (speech bubbles only) she still gestures a little.
     let voice = ctx.talk.max(0.35) * ctx.style.energy.clamp(0.7, 1.3);
-    let beat = (t * 5.3).sin() * voice;
+    let beat = (t * 2.4).sin() * voice;
     // Drift between gesturing with one hand and with both.
-    let both = smoothstep(-0.2, 0.5, (t * 0.47).sin());
+    let both = 0.5 * smoothstep(-0.2, 0.5, (t * 0.47).sin());
     act.pose.head(beat * 0.03, 0.0, (t * 1.1).sin() * 0.03);
     act.pose.spine(0.01 + beat * 0.012, (t * 0.8).sin() * 0.03, 0.0);
 
     let mut gesture = Pose::default();
     for side in Side::BOTH {
         let phase = if side == Side::Right { 0.0 } else { 1.3 };
-        let wave = (t * 5.3 + phase).sin() * voice;
+        let wave = (t * 2.4 + phase).sin() * voice;
+        let present = smoothstep(-0.7, 0.7, (t * 0.8 + phase).sin());
         gesture.arm(
             side,
             Arm {
-                down: 1.08,
+                down: 1.16 - 0.16 * present,
                 swing: 0.42 + wave * 0.08,
                 yaw: 0.0,
                 twist: 0.12,
-                bend: 1.5 + wave * 0.2,
-                pronate: -1.05 + wave * 0.15,
+                bend: 0.85 + 0.45 * present + wave * 0.1,
+                pronate: -0.65 * present,
             },
         );
-        gesture.wrist(side, -0.15 + wave * 0.12, 0.0, 0.0);
-        gesture.fingers(side, HandShape::OPEN.mix(HandShape::RELAXED, 0.45));
+        gesture.wrist(side, -0.08 + (t * 2.4 + phase - 0.5).sin() * voice * 0.08, 0.05 * wave, 0.0);
+        gesture.fingers(side, HandShape::RELAXED.mix(HandShape::OPEN, 0.4 * present));
         let weight = if side == Side::Right { 1.0 } else { both };
         act.pose.blend_bones(&gesture, arm_bones(side), weight);
     }
@@ -924,26 +927,26 @@ fn sit(ctx: &Ctx) -> Act {
 
 fn wave(ctx: &Ctx) -> Act {
     let mut act = idle(ctx);
-    let (t, e, u) = (ctx.t, ctx.e, ctx.u());
-    let swing = (t * 9.5).sin();
+    let e = ctx.e;
+    // Two small wrist waves, a held peace sign, then lower the hand before repeating.
+    let cycle = e.rem_euclid(6.0);
+    let raise = smoothstep(0.0, 0.55, cycle) * (1.0 - smoothstep(4.0, 4.7, cycle));
+    let greeting = 1.0 - smoothstep(1.8, 2.3, cycle);
+    let peace = smoothstep(1.8, 2.5, cycle);
+    let swing = ((cycle - 0.55).max(0.0) * TAU * 1.3).sin() * greeting;
     act.pose.spine(-0.02, 0.0, 0.04);
     act.pose.head(-0.03, 0.0, -0.09);
     let mut arm = Pose::default();
     arm.shrug(Side::Right, 0.12, 0.0);
     arm.arm(
         Side::Right,
-        Arm { down: -0.3, swing: 0.0, yaw: 0.3, twist: -1.45, bend: 1.15 + 0.38 * swing, pronate: 0.0 },
+        Arm { down: 0.18, swing: 0.0, yaw: 0.2, twist: -1.35, bend: 1.25 + 0.06 * swing, pronate: 0.0 },
     );
-    arm.wrist(Side::Right, 0.0, 0.22 * (t * 9.5 + 0.6).sin(), 0.0);
-    arm.fingers(Side::Right, HandShape::OPEN);
+    arm.wrist(Side::Right, 0.04, 0.22 * swing, 0.07 * swing);
+    arm.fingers(Side::Right, HandShape::OPEN.mix(HandShape::PEACE, peace));
     let bones = arm_bones(Side::Right).chain([Bone::RightShoulder]);
-    act.pose.blend_bones(&arm, bones, 1.0);
-    let bounce = (t * 4.8).sin() * 0.5 + 0.5;
-    for side in Side::BOTH {
-        act.feet[side.index()].heel = bounce * 0.18;
-    }
-    act.hop = 0.04 * u * bump(e / 0.36);
-    act.face = Face { happy: 0.85, ..default() };
+    act.pose.blend_bones(&arm, bones, raise);
+    act.face = Face { happy: 0.65, wink: 0.5 * bump((cycle - 2.5) / 0.5), ..default() };
     act.walk_arms = 0.5;
     act
 }
@@ -962,7 +965,7 @@ mod tests {
     const ALL: [Emote; 23] = Emote::ALL;
 
     pub(super) fn ctx(rig: &Rig, t: f32, style: Style) -> Ctx<'_> {
-        Ctx { rig, t, e: t, style, talk: 0.5, energy: 0.6, beat: t * 2.0 }
+        Ctx { rig, t, e: t, style, talk: 0.5, energy: 0.6, beat: t * 2.0, bpm: 120.0 }
     }
 
     #[test]

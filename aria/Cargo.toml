@@ -40,6 +40,7 @@ rodio = { version = "0.23", default-features = false, features = [
 ] }
 cpal = "0.18"
 wasapi = "0.27"
+windows-future = { version = "0.3.2", default-features = false }
 sysinfo = "0.40"
 windows = { workspace = true, features = [
   # System media sessions (what is playing, from any app or browser tab).

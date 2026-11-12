@@ -1,4 +1,4 @@
-// The desktop mascot, top to bottom: speech bubble, command bar, avatar stage slot.
+// The desktop mascot: a command bar and a speech bubble following the avatar head.
 //
 // The bar sits above her head, not under her feet: she stands on the taskbar, so anything below
 // the stage would be off the bottom of the screen.
@@ -50,6 +50,8 @@ component CommandBar inherits Rectangle {
     in property <bool> subtitles: true;
     in property <bool> busy: false;
     in-out property <string> draft: "";
+    out property <bool> editing: field.has-focus;
+    public function focus-prompt() { field.focus(); }
 
     callback send(string);
     callback toggle-vision();
@@ -120,15 +122,13 @@ component CommandBar inherits Rectangle {
                 width: parent.width - 8px;
                 height: parent.height;
                 vertical-alignment: center;
-                text: root.draft;
+                text <=> root.draft;
                 font-size: 12.5px;
                 font-family: Theme.font-ui;
                 color: Theme.text;
                 selection-background-color: Accent.edge;
                 selection-foreground-color: Theme.text;
                 single-line: true;
-                enabled: !root.busy;
-                edited => { root.draft = field.text; }
                 accepted => { root.submit(); }
             }
         }
@@ -149,7 +149,7 @@ export component MascotWindow inherits Window {
     title: "Aria";
     background: transparent;
 
-    // Stage slot: Rust reads these to place the WebView2 child window.
+    // Stage slot: Rust reads these to place the avatar renderer window.
     in-out property <length> stage-w: 260px;
     in-out property <length> stage-h: 370px;
     out property <length> stage-x: (root.width - root.stage-w) / 2;
@@ -165,8 +165,17 @@ export component MascotWindow inherits Window {
     in property <bool> busy: false;
     in property <bool> peeking: false;
     in-out property <string> draft: "";
+    out property <bool> editing: command-bar.editing;
+    public function focus-prompt() { command-bar.focus-prompt(); }
 
     in-out property <string> bubble-text: "";
+    in property <string> bubble-layout-text: root.bubble-text;
+    in property <float> head-x: 0.5;
+    in property <float> head-y: 0.12;
+    out property <length> bubble-x: bubble-view.x;
+    out property <length> bubble-y: bubble-view.y;
+    out property <length> bubble-w: bubble-view.width;
+    out property <length> bubble-h: bubble-view.height;
     in property <bool> bubble-shown: false;
     in property <string> status-line: "Standing by";
 
@@ -188,7 +197,7 @@ export component MascotWindow inherits Window {
     callback open-quick-dial();
     callback context-menu(Point);
 
-    width: root.stage-w + 24px;
+    width: max(root.stage-w, 420px) + 24px;
     height: root.stage-h + root.bubble-slot-height + chrome-height + 10px;
 
     out property <length> bubble-slot-height: root.subtitles && root.bubble-shown ? bubble-view.height + 8px : 0px;
@@ -201,60 +210,37 @@ export component MascotWindow inherits Window {
     changed accent-wash => { Accent.wash = root.accent-wash; }
     changed accent-edge => { Accent.edge = root.accent-edge; }
 
-    VerticalLayout {
-        padding: 0;
-        spacing: 0;
-        alignment: start;
+    // The bar stays at the top; the bubble tracks the crown within the transparent stage.
+    bubble-view := SpeechBubble {
+        x: Math.clamp(root.stage-x + root.head-x * root.stage-w - self.width / 2,
+            10px, root.width - self.width - 10px);
+        y: Math.max(root.chrome-height, root.stage-y + root.head-y * root.stage-h - self.height - 8px);
+        text: root.bubble-text;
+        layout-text: root.bubble-layout-text;
+        measure: Math.clamp(root.stage-w * 0.82, 196px, 232px);
+        tail-x: root.stage-x + root.head-x * root.stage-w - self.x;
+        visible: root.subtitles && root.bubble-shown;
+    }
 
-        // Speech bubble above her head.
-        Rectangle {
-            height: root.bubble-slot-height;
-            width: parent.width;
-            background: transparent;
-            visible: root.subtitles && root.bubble-shown;
-
-            bubble-view := SpeechBubble {
-                x: (parent.width - self.width) / 2;
-                y: 0;
-                text: root.bubble-text;
-                measure: root.stage-w;
-            }
-        }
-
-        // Command chrome, between the bubble and her head.
-        Rectangle {
-            width: parent.width;
-            height: root.chrome-height;
-            background: transparent;
-
-            CommandBar {
-                x: (parent.width - self.width) / 2;
-                y: 1px;
-                width: min(root.stage-w, 420px);
-                draft <=> root.draft;
-                vision: root.vision;
-                recording: root.recording;
-                tts: root.tts;
-                subtitles: root.subtitles;
-                busy: root.busy;
-                send(text) => { root.send-text(text); }
-                toggle-vision => { root.toggle-vision(); }
-                toggle-mic => { root.toggle-mic(); }
-                toggle-tts => { root.toggle-tts(); }
-                toggle-subtitles => { root.toggle-subtitles(); }
-                open-studio => { root.open-studio(); }
-                open-menu => { root.open-menu(); }
-                collapse => { root.collapse-bar(); }
-                visible: root.bar-visible;
-            }
-        }
-
-        // The avatar stage slot; the renderer's layered window sits exactly over it.
-        Rectangle {
-            width: root.stage-w;
-            height: root.stage-h;
-            background: transparent;
-        }
+    command-bar := CommandBar {
+        x: (parent.width - self.width) / 2;
+        y: 1px;
+        width: min(root.width - 24px, 520px);
+        draft <=> root.draft;
+        vision: root.vision;
+        recording: root.recording;
+        tts: root.tts;
+        subtitles: root.subtitles;
+        busy: root.busy;
+        send(text) => { root.send-text(text); }
+        toggle-vision => { root.toggle-vision(); }
+        toggle-mic => { root.toggle-mic(); }
+        toggle-tts => { root.toggle-tts(); }
+        toggle-subtitles => { root.toggle-subtitles(); }
+        open-studio => { root.open-studio(); }
+        open-menu => { root.open-menu(); }
+        collapse => { root.collapse-bar(); }
+        visible: root.bar-visible;
     }
 
     // Double-clicking her frame opens the action ring; right-click shows the chat bar.

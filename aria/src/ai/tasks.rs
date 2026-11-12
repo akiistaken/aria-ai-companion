@@ -143,23 +143,64 @@ fn json_body(text: &str) -> &str {
 }
 
 /// Writes her line for a proactive moment (a game started, the user came back, …) in character.
-/// `None` when the endpoint is unavailable; the caller keeps its scripted line.
+/// `None` when unavailable or repetitive; background moments stay silent.
 pub fn proactive_line(situation: &str, emotion_hint: &str) -> Option<(String, String)> {
-    let instruction = format!(
-        "Something just happened on the user's desktop. React to it out loud, unprompted, in ONE short spoken \
-         sentence (under 25 words), in character. Start with an emotion tag; a fitting one here would be \
-         [EMOTION: {emotion_hint}].\n\nWhat happened: {situation}"
-    );
-    match ask(in_character(instruction), false, true) {
-        Ok(text) => {
-            let tagged = prompt::read_tags(&text, emotion_hint);
-            (!tagged.text.is_empty()).then_some((tagged.text, tagged.emotion))
-        }
-        Err(e) => {
-            log::debug!("proactive line falls back to the script: {e}");
-            None
+    for _ in 0..2 {
+        let instruction = format!(
+            "Something just happened on the user's desktop. React to it out loud, unprompted, in ONE short spoken \
+             sentence (under 25 words), in character. Start with an emotion tag; a fitting one here would be \
+             [EMOTION: {emotion_hint}]. Use fresh wording and a different observation each time.\n\n\
+             What happened: {situation}\nRecent lines (do not repeat or paraphrase): {}",
+             recent_lines().join(" | ")
+        );
+        match ask(in_character(instruction), false, true) {
+            Ok(text) => {
+                let tagged = prompt::read_tags(&text, emotion_hint);
+                if remember_line(&tagged.text) {
+                    return Some((tagged.text, tagged.emotion));
+                }
+            }
+            Err(e) => {
+                log::debug!("background speech unavailable: {e}");
+                return None;
+            }
         }
     }
+    None
+}
+
+/// Persist a bounded history so even greetings vary between app launches. Never hold this lock
+/// during a network request; accepting a line is atomic across background jobs.
+fn line_history() -> &'static std::sync::Mutex<Vec<String>> {
+    static HISTORY: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    HISTORY.get_or_init(|| {
+        let saved = std::fs::read(crate::config::data_dir().join("reaction-history.json"))
+            .ok().and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok()).unwrap_or_default();
+        std::sync::Mutex::new(saved.into_iter().rev().take(64).collect::<Vec<_>>().into_iter().rev().collect())
+    })
+}
+
+fn recent_lines() -> Vec<String> {
+    line_history().lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn line_key(line: &str) -> String {
+    line.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn remember_line(line: &str) -> bool {
+    let key = line_key(line);
+    if key.is_empty() { return false; }
+    let mut history = line_history().lock().unwrap_or_else(|e| e.into_inner());
+    if history.iter().any(|old| line_key(old) == key) { return false; }
+    history.push(line.to_string());
+    if history.len() > 64 { history.remove(0); }
+    if let Ok(bytes) = serde_json::to_vec(&*history) {
+        if let Err(e) = std::fs::write(crate::config::data_dir().join("reaction-history.json"), bytes) {
+            log::debug!("reaction history: {e}");
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------------- idle events
@@ -182,9 +223,6 @@ pub const IDLE_ACTIONS: &[(&str, &str)] = &[
     ("laugh", "remembers something funny and giggles"),
 ];
 
-/// Where she may wander during an idle event.
-const IDLE_WALKS: &[&str] = &["none", "left", "right", "center", "roam", "perch"];
-
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct IdleEvent {
@@ -201,10 +239,8 @@ impl IdleEvent {
         if !IDLE_ACTIONS.iter().any(|(a, _)| *a == self.action) {
             return None;
         }
-        self.walk = self.walk.trim().to_lowercase();
-        if !IDLE_WALKS.contains(&self.walk.as_str()) {
-            self.walk = "none".into();
-        }
+        // Idle gestures never start a walk, even if an endpoint returns an old schema.
+        self.walk = "none".into();
         self.line = crate::util::truncate(prompt::read_tags(&self.line, "idle").text.trim(), 140);
         Some(self)
     }
@@ -218,14 +254,16 @@ pub fn idle_event(activity: &str, recent: &[String]) -> Option<IdleEvent> {
     let instruction = format!(
         "Nothing is going on right now; you are idling on the user's desktop. Decide what you do next, the way \
          someone with your current mood and personality would. The user is: {activity}. You recently did: \
-         {recent} (avoid repeating them).\n\nChoose ONE action from: {actions}.\nOptionally move: {walks}.\n\
+         {recent} (avoid repeating them).\n\nChoose ONE action from: {actions}. Stay in your current spot; never walk.\n\
          Usually stay quiet; say a short line (under 15 words) only about one time in three, and never \
          interrupt the user's focus with a question.\n\nReply with JSON only: \
-         {{\"action\": \"...\", \"walk\": \"none\", \"line\": \"\"}}",
-        walks = IDLE_WALKS.join(", ")
+         {{\"action\": \"...\", \"walk\": \"none\", \"line\": \"\"}}\n\
+         Recent lines (do not repeat or paraphrase): {}", recent_lines().join(" | ")
     );
     let text = ask(in_character(instruction), true, true).map_err(|e| log::debug!("idle event: {e}")).ok()?;
-    serde_json::from_str::<IdleEvent>(json_body(&text)).ok()?.validated()
+    let mut event = serde_json::from_str::<IdleEvent>(json_body(&text)).ok()?.validated()?;
+    if !event.line.is_empty() && !remember_line(&event.line) { event.line.clear(); }
+    Some(event)
 }
 
 /// A local stand-in when the endpoint is unavailable: an action that suits the persona, silent.
@@ -250,7 +288,7 @@ mod tests {
     fn idle_events_are_validated() {
         let ok = IdleEvent { action: " Stretch".into(), line: "[EMOTION: happy] Mmmh~".into(), walk: "LEFT".into() };
         let ok = ok.validated().expect("valid");
-        assert_eq!((ok.action.as_str(), ok.walk.as_str(), ok.line.as_str()), ("stretch", "left", "Mmmh~"));
+        assert_eq!((ok.action.as_str(), ok.walk.as_str(), ok.line.as_str()), ("stretch", "none", "Mmmh~"));
         let odd_walk = IdleEvent { action: "hum".into(), walk: "to the moon".into(), ..Default::default() };
         assert_eq!(odd_walk.validated().unwrap().walk, "none");
         assert!(IdleEvent { action: "explode".into(), ..Default::default() }.validated().is_none());

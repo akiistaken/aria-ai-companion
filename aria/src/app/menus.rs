@@ -185,6 +185,12 @@ pub(crate) fn show_bar(app: &AppHandle) {
         app.borrow().ui.set_bar_visible(true);
         sync_chrome(app);
     }
+    // The avatar is a non-activating window. Transfer keyboard focus to its chat chrome.
+    let a = app.borrow();
+    if let Some(hwnd) = mascot_hwnd(&a.ui) {
+        crate::desktop::win32::force_foreground(hwnd);
+    }
+    a.ui.invoke_focus_prompt();
 }
 
 pub(crate) fn hide_bar(app: &AppHandle) {

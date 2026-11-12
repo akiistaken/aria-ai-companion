@@ -31,9 +31,9 @@ fn on_beat(b: f32) -> f32 {
     0.5 + 0.5 * (TAU * b).cos()
 }
 
-/// A sharp hit on the beat that decays through it: claps, hits, pops.
+/// A short accent that rises into the beat and releases smoothly, including across beat zero.
 fn hit(b: f32) -> f32 {
-    (-fract(b) * 7.0).exp()
+    on_beat(b).powi(6)
 }
 
 /// -1..1 over two beats: which way a side-to-side move is going.
@@ -52,7 +52,27 @@ fn full_turn(progress: f32) -> f32 {
 
 /// How big the moves are: louder music and livelier personas dance bigger.
 fn size(ctx: &Ctx) -> f32 {
-    ctx.energy.clamp(0.4, 1.0) * ctx.style.energy.clamp(0.75, 1.3)
+    (0.15 + 0.85 * ctx.energy.clamp(0.0, 1.0))
+        * (0.55 + 0.45 * smoothstep(85.0, 145.0, ctx.bpm))
+        * ctx.style.energy.clamp(0.75, 1.3)
+}
+
+/// A soft, absorbed expression for ballads, an alert smile for faster/louder music.
+/// Accents are small enough that she never mouths every kick like a syllable.
+fn listening_face(ctx: &Ctx) -> Face {
+    let level = ctx.energy.clamp(0.0, 1.0);
+    let tempo = smoothstep(78.0, 145.0, ctx.bpm);
+    let excitement = tempo * level;
+    let accent = on_beat(ctx.beat).powi(3) * excitement;
+    let absorbed = (1.0 - tempo) * level;
+    Face {
+        happy: 0.12 + 0.3 * level + 0.32 * excitement + 0.12 * accent,
+        relaxed: 0.2 + 0.5 * (1.0 - tempo) * (1.0 - 0.3 * level),
+        eyes_closed: absorbed * (0.12 + 0.16 * on_beat(ctx.beat / 4.0)),
+        surprised: 0.13 * accent,
+        aa: 0.045 * accent,
+        ..default()
+    }
 }
 
 /// Integer hash for the deterministic routine shuffle.
@@ -71,7 +91,7 @@ type Routine = fn(&Ctx, f32) -> Act;
 const ROUTINES: &[(&str, Routine)] = &[
     ("side_tap", side_tap),
     ("idol_heart", idol_heart),
-    ("disco_point", disco_point),
+    ("chest_pulse", chest_pulse),
     ("shimmy", shimmy),
     ("concert_wave", concert_wave),
     ("bounce_clap", bounce_clap),
@@ -111,7 +131,25 @@ fn routine_name(beat: f32, calm: bool) -> &'static str {
 }
 
 pub fn dance(ctx: &Ctx) -> Act {
-    let calm = ctx.style.energy < 0.8;
+    if ctx.bpm < 94.0 {
+        return groove(ctx);
+    }
+    let mut act = dance_phrase(ctx, true);
+    // A continuous transition between smaller and bigger routines, so a volume accent or
+    // tempo correction cannot abruptly switch the arms to another pose.
+    let drive = if ctx.style.energy < 0.8 { 0.0 } else {
+        smoothstep(108.0, 135.0, ctx.bpm) * smoothstep(0.5, 0.85, ctx.energy)
+    };
+    if drive > 0.0 {
+        act.blend(&dance_phrase(ctx, false), drive);
+    }
+    act.face = listening_face(ctx);
+    act.attention = 0.3;
+    act.walk_arms = 0.4;
+    act
+}
+
+fn dance_phrase(ctx: &Ctx, calm: bool) -> Act {
     let phrase = (ctx.beat / PHRASE).floor();
     let local = ctx.beat - phrase * PHRASE;
     let (_, current) = ROUTINES[routine_for(phrase as i64, calm)];
@@ -122,20 +160,13 @@ pub fn dance(ctx: &Ctx) -> Act {
         let (_, next) = ROUTINES[routine_for(phrase as i64 + 1, calm)];
         act.blend(&next(ctx, local - PHRASE), fade);
     }
-    // Twirls once into the dance. A finished turn is 0, not 2π: blends to and from other poses
-    // interpolate `spin`, and a lingering 2π would unwind the turn backwards.
-    act.spin += full_turn(smoothstep(0.0, 0.9, ctx.e));
-    act.face = Face { happy: 0.75 + 0.25 * on_beat(ctx.beat), ..act.face };
-    act.attention = 0.3;
-    act.walk_arms = 0.4;
     act
 }
 
 // ---- Routines -----------------------------------------------------------------------------------
 // Each takes the beat within its phrase (`b`, 0..16; slightly negative while cross-fading in).
 
-/// Side taps, the right foot then the left, over three arm figures (fist pumps, arms up waving,
-/// forearm rolls).
+/// Side taps, the right foot then the left, under continuous forearm rolls.
 fn side_tap(ctx: &Ctx, b: f32) -> Act {
     let mut act = neutral(ctx);
     let (u, k) = (ctx.u(), size(ctx));
@@ -153,17 +184,16 @@ fn side_tap(ctx: &Ctx, b: f32) -> Act {
     act.pose.head(0.06 * on_beat(b), 0.0, 0.08 * sway(b));
     act.crouch = 0.035 * u * on_beat(b) * k;
 
-    let figure = ((b / 4.0).floor() as i32).rem_euclid(3);
     let mut arms = Pose::default();
     for side in Side::BOTH {
-        let alt = (PI * b + if side == Side::Left { 0.0 } else { PI }).sin();
-        let arm = match figure {
-            0 => Arm { down: -0.45 - 0.35 * alt, swing: 0.0, yaw: 0.35, twist: -1.35, bend: 1.3 - 0.5 * alt, pronate: 0.0 },
-            1 => Arm { down: -1.0 + 0.22 * lr * side.sign(), swing: 0.0, yaw: 0.15, twist: -1.2, bend: 0.45, pronate: 0.0 },
-            _ => Arm { down: 0.75, swing: 0.3, yaw: 0.3, twist: 0.5 + 0.35 * alt, bend: 1.9 + 0.25 * alt, pronate: 0.0 },
-        };
+        // A continuous forearm roll with wrists following a quarter beat behind.
+        let phase = PI * b * 0.5 + if side == Side::Left { 0.0 } else { PI };
+        let roll = phase.sin();
+        let arm = Arm { down: 0.95 - 0.22 * roll * k, swing: 0.3 + 0.14 * phase.cos() * k,
+            yaw: 0.12, twist: 0.2 + 0.22 * roll * k, bend: 1.25 + 0.28 * phase.cos() * k, pronate: -0.35 };
         arms.arm(side, arm);
-        arms.fingers(side, if figure == 1 { HandShape::OPEN } else { HandShape::LOOSE_FIST });
+        arms.wrist(side, 0.12 * (phase - 0.4).sin(), 0.08 * (phase - 0.4).cos(), 0.0);
+        arms.fingers(side, HandShape::RELAXED.mix(HandShape::LOOSE_FIST, 0.3 + 0.2 * roll));
         act.pose.blend_bones(&arms, super::arm_bones(side), 1.0);
     }
     act
@@ -203,32 +233,30 @@ fn idol_heart(ctx: &Ctx, b: f32) -> Act {
     act
 }
 
-/// Disco: the right hand points up to the far corner, then down across the body, every beat;
-/// the left hand on the hip; hips swinging.
-fn disco_point(ctx: &Ctx, b: f32) -> Act {
+/// A two-handed chest pulse with alternating shoulder accents and soft heel lifts.
+/// Elbows stay close; the wrists open together instead of one arm sweeping up and down.
+fn chest_pulse(ctx: &Ctx, b: f32) -> Act {
     let mut act = neutral(ctx);
     let (u, k) = (ctx.u(), size(ctx));
-    // Up on the beat, down on the off-beat, with a quick snap into each.
-    let up = smoothstep(0.0, 0.25, fract(b)) * (1.0 - smoothstep(0.5, 0.75, fract(b)));
-    let side_to_side = sway(b);
-    act.pose.hips.x -= 0.04 * u * side_to_side * k;
-    act.pose.pelvis(0.0, 0.08 * side_to_side, -0.1 * side_to_side * k);
-    act.pose.spine(-0.03, 0.12 * (up - 0.5) * k, 0.05 * side_to_side - 0.06 * up);
-    act.pose.head(-0.1 * up, 0.12 * (up - 0.5), -0.05 * up);
-    act.crouch = 0.03 * u * on_beat(b) * k;
-    let point_up = Arm { down: -0.95, swing: 0.0, yaw: -0.1, twist: -1.2, bend: 0.08, pronate: 0.0 };
-    let point_down = Arm { down: 1.0, swing: 0.55, yaw: 0.0, twist: 0.4, bend: 0.15, pronate: 0.0 };
-    let mut arm = Pose::default();
-    arm.arm(Side::Right, point_down);
-    let mut raised = Pose::default();
-    raised.arm(Side::Right, point_up);
-    arm.blend(&raised, up);
-    arm.fingers(Side::Right, HandShape::POINT);
-    act.pose.blend_bones(&arm, super::arm_bones(Side::Right), 1.0);
-    super::hand_on_hip(&mut act.pose, ctx, Side::Left);
-    // The free foot taps out to the side on the off-beat.
-    act.feet[Side::Right.index()].offset.x = -0.08 * u * (1.0 - up) * k;
-    act.feet[Side::Right.index()].heel = 0.3 * (1.0 - up);
+    let pulse = on_beat(b);
+    let travel = sway(b / 2.0);
+    let open = 0.5 - 0.5 * (PI * b * 0.5).cos();
+    act.pose.hips.x += 0.025 * u * travel * k;
+    act.pose.pelvis(0.0, 0.06 * travel * k, -0.045 * travel * k);
+    act.pose.spine(-0.025 + 0.045 * pulse * k, -0.08 * travel * k, 0.025 * travel);
+    act.pose.head(0.04 * pulse * k, 0.0, -0.04 * travel);
+    act.crouch = 0.025 * u * pulse * k;
+    for side in Side::BOTH {
+        act.pose.shrug(side, 0.025 + 0.025 * sway(b) * side.sign() * k, 0.0);
+        act.pose.arm(side, Arm {
+            down: 1.05 - 0.12 * open * k, swing: 0.2 + 0.04 * pulse * k,
+            yaw: 0.1, twist: 0.2 + 0.12 * open * k,
+            bend: 1.35 + 0.12 * pulse * k, pronate: -0.25,
+        });
+        act.pose.wrist(side, -0.08 + 0.1 * open, 0.08 * open, 0.0);
+        act.pose.fingers(side, HandShape::RELAXED.mix(HandShape::OPEN, 0.65 * open));
+        act.feet[side.index()].heel = 0.18 * (travel * side.sign()).max(0.0) * k;
+    }
     act
 }
 
@@ -283,10 +311,10 @@ fn concert_wave(ctx: &Ctx, b: f32) -> Act {
 fn bounce_clap(ctx: &Ctx, b: f32) -> Act {
     let mut act = neutral(ctx);
     let (u, k) = (ctx.u(), size(ctx));
-    let bar = fract(b / 4.0) * 4.0;
     // Claps on beats 2 and 4 (1 and 3 counting from zero).
-    let clap_beat = (bar.floor() as i32) % 2 == 1;
-    let closing = if clap_beat { 1.0 - smoothstep(0.0, 0.18, fract(b)) } else { 0.0 };
+    let phase = (b - 1.0).rem_euclid(2.0);
+    let distance = phase.min(2.0 - phase);
+    let closing = 1.0 - smoothstep(0.04, 0.32, distance);
     let apart = 0.03 + 0.17 * (1.0 - closing);
     hands_together(&mut act.pose, ctx, -0.01 + 0.03 * closing, 0.2, apart, HandShape::FLAT);
     act.pose.spine(0.02 + 0.04 * hit(b), 0.0, 0.03 * sway(b));
@@ -370,14 +398,40 @@ const GROOVES: &[Loop] = &[nod, sway_snap, step_touch];
 pub fn groove(ctx: &Ctx) -> Act {
     let n = (ctx.beat / GROOVE_LOOP).floor();
     let local = ctx.beat - n * GROOVE_LOOP;
-    let en = ctx.energy.clamp(0.35, 1.0) * ctx.style.energy.clamp(0.8, 1.2);
+    let en = (0.1 + 0.9 * ctx.energy.clamp(0.0, 1.0)) * ctx.style.energy.clamp(0.8, 1.2);
     let pick = |n: f32| hash(n as i64 ^ 0x5eed) as usize % GROOVES.len();
     let mut act = GROOVES[pick(n)](ctx, ctx.beat, en);
     let fade = smoothstep(GROOVE_LOOP - 1.0, GROOVE_LOOP, local);
     if fade > 0.0 {
         act.blend(&GROOVES[pick(n + 1.0)](ctx, ctx.beat, en), fade);
     }
+    // Slow songs keep their own tempo, with the weight transfer stretched across four beats.
+    // Blend by BPM rather than halving a changing beat count, which would jump the phase.
+    act.blend(&slow_sway(ctx, ctx.beat, en), 1.0 - smoothstep(82.0, 104.0, ctx.bpm));
+    act.face = listening_face(ctx);
+    act.attention = 0.35;
     act.walk_arms = 0.5;
+    act
+}
+
+fn slow_sway(ctx: &Ctx, b: f32, en: f32) -> Act {
+    let mut act = neutral(ctx);
+    let u = ctx.u();
+    let phase = TAU * b / 4.0;
+    let weight = phase.sin();
+    act.pose.hips.x += 0.045 * u * weight * en;
+    act.pose.pelvis(0.0, 0.035 * weight * en, 0.055 * weight * en);
+    act.pose.spine(0.01, -0.045 * weight * en, -0.05 * weight * en);
+    act.pose.head(0.055 * on_beat(b) * en, 0.025 * weight, 0.06 * (phase - 0.35).sin() * en);
+    act.crouch = 0.012 * u * on_beat(b) * en;
+    for side in Side::BOTH {
+        let trail = (phase - 0.55).sin() * side.sign();
+        act.pose.arm(side, Arm { down: 1.24, swing: 0.16 + 0.13 * trail * en,
+            bend: 0.42 + 0.15 * trail * en, twist: 0.2, ..Arm::HANG });
+        act.pose.wrist(side, 0.06 * (phase - 0.8).sin(), 0.04 * trail, 0.0);
+        act.pose.fingers(side, HandShape::RELAXED);
+        act.feet[side.index()].heel = 0.1 * (weight * side.sign()).max(0.0) * en;
+    }
     act
 }
 
@@ -485,7 +539,7 @@ mod tests {
         for (name, routine) in ROUTINES {
             for step in -8..=136 {
                 let b = step as f32 * 0.125;
-                let ctx = Ctx { rig: &rig, t: b * 0.5, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b };
+                let ctx = Ctx { rig: &rig, t: b * 0.5, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b, bpm: 120.0 };
                 let act = routine(&ctx, b);
                 assert!(act.pose.rot.iter().all(|q| q.is_finite() && q.is_normalized()), "{name} at beat {b}");
                 assert!(act.pose.hips.is_finite() && act.hop >= 0.0 && act.crouch.is_finite(), "{name} at beat {b}");
@@ -497,17 +551,73 @@ mod tests {
     fn bounces_bottom_out_on_the_beat() {
         let rig = Rig::synthetic(&[]);
         let at = |b: f32| {
-            let ctx = Ctx { rig: &rig, t: 0.0, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b };
+            let ctx = Ctx { rig: &rig, t: 0.0, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b, bpm: 120.0 };
             side_tap(&ctx, b).crouch
         };
         assert!(at(4.0) > at(4.5), "lowest on the beat, highest between");
     }
 
     #[test]
+    fn hand_accents_are_continuous_across_beats() {
+        let rig = Rig::synthetic(&[]);
+        for b in [0.0, 1.0, 2.0, 3.0, 4.0] {
+            assert!((hit(b - 0.001) - hit(b + 0.001)).abs() < 0.01);
+            let ctx = super::super::tests::ctx(&rig, 4.0, Style::default());
+            let before = bounce_clap(&ctx, b - 0.001);
+            let after = bounce_clap(&ctx, b + 0.001);
+            for side in Side::BOTH {
+                for bone in super::super::arm_bones(side) {
+                    assert!(before.pose.rot[bone.index()].angle_between(after.pose.rot[bone.index()]) < 0.03);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn listening_expression_responds_to_both_tempo_and_level() {
+        let rig = Rig::synthetic(&[]);
+        let mut ctx = super::super::tests::ctx(&rig, 4.0, Style::default());
+        ctx.bpm = 65.0;
+        ctx.energy = 0.2;
+        let soft = groove(&ctx).face;
+        ctx.energy = 0.9;
+        let slow_loud = groove(&ctx).face;
+        ctx.bpm = 145.0;
+        let fast = groove(&ctx).face;
+        assert!(slow_loud.happy > soft.happy);
+        assert!(fast.happy > slow_loud.happy);
+        assert!(soft.relaxed > fast.relaxed && slow_loud.eyes_closed > fast.eyes_closed);
+        ctx.beat += 0.5;
+        assert!(groove(&ctx).face.surprised < fast.surprised, "accents land on the beat");
+    }
+
+    #[test]
+    fn slow_songs_keep_their_feet_down_and_arms_below_the_shoulders() {
+        let rig = Rig::synthetic(&[]);
+        for bpm in [45.0, 65.0, 80.0] {
+            for step in 0..128 {
+                let mut ctx = super::super::tests::ctx(&rig, 5.0, Style::default());
+                ctx.bpm = bpm;
+                ctx.energy = 1.0;
+                ctx.beat = step as f32 / 8.0;
+                let act = dance(&ctx);
+                assert_eq!(act.hop, 0.0);
+                let lm = Landmarks::of(&rig, &act.pose);
+                for side in Side::BOTH {
+                    use crate::rig::Bone;
+                    assert_eq!(act.feet[side.index()].lift, 0.0);
+                    assert!(lm.pos(Bone::LeftHand.on(side)).y < lm.pos(Bone::LeftUpperArm.on(side)).y);
+                }
+                assert!(act.pose.rot.iter().all(|q| q.is_finite() && q.is_normalized()));
+            }
+        }
+    }
+
+    #[test]
     fn claps_land_on_two_and_four() {
         let rig = Rig::synthetic(&[]);
         let gap = |b: f32| {
-            let ctx = Ctx { rig: &rig, t: 0.0, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b };
+            let ctx = Ctx { rig: &rig, t: 0.0, e: 5.0, style: Style::default(), talk: 0.0, energy: 0.8, beat: b, bpm: 120.0 };
             let lm = Landmarks::of(&rig, &bounce_clap(&ctx, b).pose);
             lm.pos(crate::rig::Bone::LeftHand).distance(lm.pos(crate::rig::Bone::RightHand))
         };

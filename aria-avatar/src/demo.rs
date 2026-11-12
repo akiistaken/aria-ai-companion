@@ -4,7 +4,7 @@
 //! ARIA_AVATAR_SHOTS=<folder> [ARIA_AVATAR_SCRIPT="happy@ground@0,0@2@4; idle@ground@160,0@2@6"] aria-avatar.exe
 //! ```
 //!
-//! Each `;`-separated step is `emotion@mode@vx,vy@seconds@shots[@persona]`: act out `emotion` in
+//! Each `;`-separated step is `emotion@mode@vx,vy@seconds@shots[@persona[@bpm@dbfs]]`: act out `emotion` in
 //! body `mode` (`ground`, `air`, `held`) while the window travels at `vx,vy` pixels per second, for
 //! `seconds`, saving `shots` evenly spaced frames. Every step becomes one contact-sheet PNG in the
 //! folder, with the floor drawn as a line. The run shows no window and uses a fixed 30 FPS clock,
@@ -46,6 +46,7 @@ struct Step {
     seconds: f32,
     shots: u32,
     persona: String,
+    music: Option<(f32, f32)>,
 }
 
 impl Step {
@@ -65,6 +66,15 @@ impl Step {
             seconds: fields.next()?.parse().ok()?,
             shots: fields.next()?.parse().ok()?,
             persona: fields.next().unwrap_or("").to_string(),
+            music: match fields.next() {
+                Some(bpm) => {
+                    let bpm: f32 = bpm.parse().ok()?;
+                    let dbfs: f32 = fields.next()?.parse().ok()?;
+                    if !bpm.is_finite() || bpm <= 0.0 || !dbfs.is_finite() { return None; }
+                    Some((bpm, ((dbfs + 48.0) / 42.0).clamp(0.0, 1.0)))
+                }
+                None => None,
+            },
         })
     }
 }
@@ -220,6 +230,13 @@ pub fn drive(mut demo: ResMut<Demo>, mut state: ResMut<AvatarState>, mut animato
     state.emote = Emote::parse(&step.emotion);
     state.body = step.mode;
     state.style = Style::for_persona(&step.persona);
+    state.music_active = step.music.is_some();
+    if let Some((bpm, energy)) = step.music {
+        state.music_energy = energy;
+        state.music_sync = Some(crate::animator::BeatSync {
+            bpm, phase: (demo.frame as f32 * STEP_SECS * bpm / 60.0).fract(),
+        });
+    }
     demo.window += step.velocity * STEP_SECS;
     animator.simulated_window = Some(demo.window.round().as_ivec2());
 
@@ -251,6 +268,9 @@ mod tests {
         assert_eq!(step.velocity, Vec2::new(-120.0, 40.0));
         assert_eq!((step.seconds, step.shots), (1.5, 3));
         assert_eq!(step.persona, "genki");
+        assert!(step.music.is_none());
+        assert_eq!(Step::parse("idle@ground@0,0@8@4@@65@-27").unwrap().music, Some((65.0, 0.5)));
+        assert!(Step::parse("idle@ground@0,0@8@4@@NaN@-27").is_none());
         assert!(Step::parse("happy@ground@0@1@1").is_none(), "velocity needs two numbers");
         assert!(Step::parse("").is_none());
         for text in DEFAULT_SCRIPT.split(';') {

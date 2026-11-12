@@ -315,6 +315,7 @@ dependencies = [
  "ureq",
  "wasapi",
  "windows",
+ "windows-future",
 ]
 
 [[package]]

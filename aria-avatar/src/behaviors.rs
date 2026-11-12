@@ -63,6 +63,7 @@ pub struct AvatarState {
     pub drift: Vec2,
     /// Last `Stage` geometry reported to the app.
     stage_reported: Option<(f32, f32)>,
+    head_reported: Option<Vec2>,
 
     // ---- Model ----
     pub root: Option<Entity>,
@@ -103,6 +104,7 @@ impl Default for AvatarState {
             busy: false,
             drift: Vec2::ZERO,
             stage_reported: None,
+            head_reported: None,
             root: None,
             rig: None,
             props_pending: false,
@@ -348,12 +350,14 @@ pub fn animate(
             speech,
             // Without music, dancing on request goes full out.
             music: if s.music_active { s.music_energy } else { 1.0 },
+            music_active: s.music_active,
             music_fill,
             sync,
             headpat: s.headpat_active,
             peeking: s.peeking,
         };
-        let frame = animator.step(rig, &input, t, dt);
+        let mut frame = animator.step(rig, &input, t, dt);
+        crate::props::hold_props(rig, &mut frame.pose, &s.props);
         {
             let mut transforms = parts.p2();
             rig.apply(&frame.pose, &mut transforms);
@@ -368,6 +372,31 @@ pub fn animate(
     s.busy = frame.as_ref().is_some_and(|frame| frame.busy);
     let gaze = frame.as_ref().map(|frame| frame.gaze).unwrap_or(s.smoothed_look);
     let drop = frame.as_ref().map(|frame| frame.drop).unwrap_or(0.0);
+
+    // Project the animated head (including root turns, sitting and camera follow), not the
+    // top of the fixed stage. Carrying the camera and model cancels out in this local space.
+    if let Some((rig, frame)) = s.rig.as_ref().zip(frame.as_ref()) {
+        let fk = rig.fk(&frame.pose);
+        let head = crate::rig::Bone::Head.index();
+        let mut crown = rig.metrics.height - rig.rest(crate::rig::Bone::Head).y;
+        for (prop, height) in [("witch_hat", 0.50), ("halo", 0.31), ("cat_ears", 0.26), ("devil_horns", 0.30)] {
+            if s.props.get(prop).copied().unwrap_or(false) {
+                crown = crown.max(height * rig.metrics.unit);
+            }
+        }
+        let point = frame.root.transform_point(fk.pos[head] + fk.rot[head] * Vec3::Y * crown);
+        let eye_y = framing.target_y - drop * framing.follow;
+        let focal = s.viewport.1 as f32 / (2.0 * (crate::FOV_DEGREES.to_radians() * 0.5).tan());
+        let ppm = focal / (framing.distance - point.z).max(0.1);
+        let anchor = Vec2::new(0.5 + point.x * ppm / s.viewport.0.max(1) as f32,
+            0.5 - (point.y - eye_y) * ppm / s.viewport.1.max(1) as f32);
+        if anchor.is_finite() && s.head_reported.is_none_or(|old| {
+            ((anchor - old) * Vec2::new(s.viewport.0 as f32, s.viewport.1 as f32)).length() > 0.65
+        }) {
+            s.head_reported = Some(anchor);
+            link.send(Event::HeadAnchor { x: anchor.x, y: anchor.y });
+        }
+    }
 
     // ---- Camera and look target --------------------------------------------------------------
     if let Ok(mut camera) = parts.p0().single_mut() {

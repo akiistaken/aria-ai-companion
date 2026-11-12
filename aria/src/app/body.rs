@@ -18,7 +18,7 @@ pub(crate) fn setup_window(app: &AppHandle) {
     let scale = config::get().avatar_scale;
     let (_, _, aw, ah) = crate::desktop::win32::work_area();
     let sf = app.borrow().ui.window().scale_factor();
-    let width = STAGE_BASE_W * scale + 24.0;
+    let width = (STAGE_BASE_W * scale).max(420.0) + 24.0;
     let height = STAGE_BASE_H * scale + 54.0;
     let x = (aw - (width * sf) as i32 - 40).max(20);
     let y = (ah - (height * sf) as i32 - 20).max(20);
@@ -51,7 +51,7 @@ pub(crate) fn sync_chrome(app: &AppHandle) {
             a.bubble_slot,
         )
     };
-    let width = STAGE_BASE_W * scale + 24.0;
+    let width = (STAGE_BASE_W * scale).max(420.0) + 24.0;
     let height = STAGE_BASE_H * scale + bubble_slot + chrome + 10.0;
     app.borrow()
         .ui
@@ -250,7 +250,7 @@ pub(crate) fn window_size(app: &AppHandle) -> (i32, i32) {
 /// Moves the whole body to `(x, y)`: the Slint chrome and the avatar window together.
 ///
 /// This is the single funnel for every movement path (walking, dragging, edge snap, game dodge,
-/// perch, boredom roam, initial placement), so the avatar can never drift away from its chrome.
+/// perch, initial placement), so the avatar can never drift away from its chrome.
 pub(crate) fn set_window_pos(app: &AppHandle, x: i32, y: i32) {
     app.borrow_mut().pos = (x, y);
     // Both windows move in one `DeferWindowPos` batch, so the avatar and its chat chrome land in
@@ -332,42 +332,33 @@ pub(crate) fn avatar_rect(app: &AppHandle) -> (i32, i32, i32, i32) {
     )
 }
 
-/// Removes the stage slot from the mascot window's hit region.
-///
-/// The Slint window is transparent but still a normal window, so without this it would swallow
-/// every click over the avatar's empty space and click-through could never reach the desktop.
-/// With the slot cut out, the avatar's own layered window decides per pixel.
+/// Keeps the mascot window's paint/input region around its visible bubble and command bar.
+/// The rest is transparent to both the avatar renderer and the desktop, including while the
+/// bubble follows a sitting or leaning head into the stage slot.
 pub(crate) fn cut_stage_hole(app: &AppHandle) {
     let a = app.borrow();
     let sf = a.ui.window().scale_factor();
     let size = a.ui.window().size();
-    let hole = (
-        (a.ui.get_stage_x() * sf).round() as i32,
-        (a.ui.get_stage_y() * sf).round() as i32,
-        (a.ui.get_stage_w() * sf).round() as i32,
-        (a.ui.get_stage_h() * sf).round() as i32,
+    let rect = |x: f32, y: f32, w: f32, h: f32| (
+        (x * sf).floor() as i32, (y * sf).floor() as i32,
+        (w * sf).ceil() as i32, (h * sf).ceil() as i32,
     );
-    let bar_visible = a.ui.get_bar_visible();
-    let chrome = (a.ui.get_chrome_height() * sf).round() as i32;
-    let key = (size.width as i32, size.height as i32, hole, bar_visible);
-    if a.region_key == Some(key) {
-        return;
+    let mut visible = Vec::new();
+    if a.ui.get_bubble_shown() && a.ui.get_subtitles() {
+        // Include the border/shadow without making the whole transparent stage eat clicks.
+        visible.push(rect(a.ui.get_bubble_x() - 4.0, a.ui.get_bubble_y() - 4.0,
+            a.ui.get_bubble_w() + 8.0, a.ui.get_bubble_h() + 8.0));
     }
-    let Some(hwnd) = mascot_hwnd(&a.ui) else {
-        return;
-    };
+    if a.ui.get_bar_visible() {
+        let width = size.width as f32 / sf;
+        let bar_w = (width - 24.0).min(520.0);
+        visible.push(rect((width - bar_w) * 0.5, 0.0, bar_w, a.ui.get_chrome_height()));
+    }
+    let key = (size.width as i32, size.height as i32, visible.clone());
+    if a.region_key.as_ref() == Some(&key) { return; }
+    let Some(hwnd) = mascot_hwnd(&a.ui) else { return; };
     drop(a);
-    // Empty strips must not swallow clicks meant for the desktop: the padding under the stage
-    // always, and the bar's slot above her head while the bar is hidden.
-    let below_stage = hole.1 + hole.3;
-    let under = (0, below_stage, size.width as i32, size.height as i32 - below_stage);
-    let bar_slot = (0, hole.1 - chrome, size.width as i32, chrome);
-    let holes: &[(i32, i32, i32, i32)] = if bar_visible {
-        &[hole, under]
-    } else {
-        &[hole, under, bar_slot]
-    };
-    crate::desktop::win32::set_region_with_holes(hwnd, size.width as i32, size.height as i32, holes);
+    crate::desktop::win32::set_region_rects(hwnd, &visible);
     app.borrow_mut().region_key = Some(key);
 }
 

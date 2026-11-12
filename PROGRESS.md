@@ -11,6 +11,36 @@ called out below.
 
 ## Status
 
+### Chat input and music motion — 2026-11-12
+
+Follow-up from live Spotify playback: the old 0.3 confidence cutoff rejected real songs whose
+beat confidence was around 0.16–0.26. Three agreeing estimates now acquire tempo at 0.12,
+isolated tempo outliers are ignored, and short quiet breaks retain the beat. Metadata queries
+are bounded, paused sessions are skipped, and an audible Spotify session can keep reactions
+running even if Windows never returns a metadata request. Only one metadata query can remain
+outstanding. `ARIA_MUSIC_TRACE=1` logs delivered level/BPM every three seconds; the ignored
+`live_music_probe` test checks the live meters and production beat worker. The full app was
+observed receiving changing Spotify levels/tempo, including silence and subsequent tracks.
+Current regression suite: 156 tests pass; 4 opt-in live tests are excluded from the default run.
+
+- Chat now reserves at least 420 logical pixels for its controls and prompt at every avatar
+  scale. Opening it transfers focus from the non-activating avatar to the text field. Drafts
+  remain editable during a reply, and focused typing keeps the bar open. Empty stage margins
+  still pass clicks through to the desktop.
+- The greeting uses a wrist wave followed by a peace sign; speech gestures and dance forearm
+  rolls are slower and fluid. Finger accents and claps now approach the beat continuously.
+- Tempo detection covers 45–180 BPM. Levels use smoothed session-meter dBFS estimates mapped
+  from -48 to -6 dB, sent to the renderer at 20 Hz. Song/source changes reset beat history.
+  Slow or uncertain rhythms groove; loud ballads cannot trigger fast choreography. Expressions
+  blend relaxation, smiles, eyelids and small beat accents from both tempo and level.
+- Validation: 154 workspace tests pass (3 live AI tests ignored), plus the native
+  `cargo run --example chat_input_check` smoke check at scales 0.5, 1 and 2.5. Scripted avatar
+  previews checked the greeting, speech, 65 BPM and 140 BPM at multiple levels. Preview steps
+  accept optional `@persona@bpm@dbfs`, for example `idle@ground@0,0@12@8@@65@-18`.
+- Beat accuracy was checked with synthetic rhythms; real-song tempo remains an estimate from
+  session peaks, and dBFS is a digital level estimate rather than calibrated acoustic dB SPL.
+
+
 | Phase | State |
 |---|---|
 | 0 Environment | done |

@@ -50,24 +50,40 @@ pub(crate) fn apply_persona(app: &AppHandle) {
 }
 
 pub(crate) fn greeting(app: &AppHandle) {
-    let key = crate::persona::current_key();
-    let line = match key.as_str() {
-    "yandere" => "I'm right here on your desktop watching over you. We're going to get so much done today.",
-        "tomboy" => "Aria reporting in! Tell me what we're tackling first today.",
-        "bakadere" => "Yaaay, you're here! I dropped my pencil five times waiting, but now my day is 100% amazing.",
-        "kuudere" => "Aria operational. Diagnostics optimal. Standing by.",
-        "genki" => "GOOD MORNING! Aria is pumped and 1000% ready to make today the greatest day ever.",
-        "meganekko" => "*adjusts glasses* Aria reporting for duty. Cognitive engine primed. What problem shall we solve today?",
-        _ => "Good job today! I just happened to be nearby on your desktop if you need anything.",
-    };
-    say(app, &crate::persona::flav(line), "talking", vec![], true);
-    let mut warm: Vec<(String, String)> = vec![(line.to_string(), "talking".into())];
-    for (kind, emotion) in [("poke", "annoyed"), ("shake", "dizzy"), ("headpat", "happy")] {
-        if let Some(text) = crate::persona::reactions::first_line(&key, kind) {
-            warm.push((text, emotion.into()));
+    react(app, "The app just opened. Greet the user for this visit, fitting the current time and mood.", "wave");
+}
+
+/// Gestures start immediately; their words arrive asynchronously from the same AI as chat.
+/// Coalesce rapid touches and discard a delayed reaction if a conversation has overtaken it.
+pub(crate) fn react(app: &AppHandle, situation: &str, emotion: &str) {
+    let (generation, started) = {
+        let mut a = app.borrow_mut();
+        if a.busy || a.reaction_pending || crate::voice::is_recording() {
+            return;
         }
-    }
-    crate::voice::precache(warm);
+        a.reaction_pending = true;
+        a.last_emotion = emotion.into();
+        a.stage.set_state(emotion, false);
+        a.bubble_hide_at = Some(Instant::now() + Duration::from_secs(5));
+        (a.speech_generation, Instant::now())
+    };
+    let (situation, emotion) = (situation.to_string(), emotion.to_string());
+    std::thread::spawn(move || {
+        let reply = crate::ai::tasks::proactive_line(&situation, &emotion);
+        post(move |app| {
+            let current = {
+                let mut a = app.borrow_mut();
+                a.reaction_pending = false;
+                a.speech_generation == generation && !a.busy && !a.dragging
+                    && !crate::voice::is_recording() && started.elapsed() < Duration::from_secs(25)
+            };
+            if current {
+                if let Some((text, emotion)) = reply {
+                    say(app, &text, &emotion, vec![], true);
+                }
+            }
+        });
+    });
 }
 
 /// The single speech path: bubble, stage expression, voice, auto-hide.
@@ -78,6 +94,7 @@ pub(crate) fn say(app: &AppHandle, text: &str, emotion: &str, logs: Vec<String>,
     let settings = config::get();
     {
         let mut a = app.borrow_mut();
+        a.speech_generation = a.speech_generation.wrapping_add(1);
         a.full_bubble_text = text.to_string();
         a.typed = 0;
         a.last_emotion = emotion.to_string();
@@ -85,6 +102,7 @@ pub(crate) fn say(app: &AppHandle, text: &str, emotion: &str, logs: Vec<String>,
             a.last_chat = Some((text.to_string(), emotion.to_string()));
         }
         a.ui.set_bubble_text("".into());
+        a.ui.set_bubble_layout_text(text.into());
         a.ui.set_bubble_shown(settings.subtitles_enabled);
         a.ui.set_status_line(status_for(emotion).into());
         a.bubble_hide_at = Some(Instant::now() + bubble_duration(text) + Duration::from_millis(3200));
@@ -261,12 +279,13 @@ pub(crate) fn stop_mic(app: &AppHandle) {
 }
 
 pub(crate) fn submit_prompt(app: &AppHandle, prompt: String, include_screen: bool) {
-    if app.borrow().busy {
+    if app.borrow().busy || prompt.trim().is_empty() {
         return;
     }
     {
         let mut a = app.borrow_mut();
         a.busy = true;
+        a.speech_generation = a.speech_generation.wrapping_add(1);
         a.ui.set_busy(true);
         a.ui.set_draft("".into());
     }

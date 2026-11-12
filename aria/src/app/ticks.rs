@@ -1,4 +1,4 @@
-//! Timers: motion, proactive events, game dodge, music vibe, boredom, UI typing and the render policy.
+//! Timers: motion, proactive events, game dodge, music vibe, idle moments, UI typing and the render policy.
 
 use super::*;
 
@@ -36,8 +36,10 @@ pub(crate) fn start_timers(app: &AppHandle) {
     }
     {
         let app = app.clone();
-        own_timer(app.clone(), Duration::from_secs(18), move || {
-            tick_boredom(&app)
+        own_timer(app.clone(), Duration::from_millis(50), move || {
+            if app.borrow().music_vibing && config::get().music_vibe_enabled {
+                send_music_levels(&app, crate::desktop::beat::latest());
+            }
         });
     }
     {
@@ -148,8 +150,12 @@ fn once_at_a_time(flag: &'static std::sync::atomic::AtomicBool, work: impl FnOnc
         return;
     }
     std::thread::spawn(move || {
+        struct Release(&'static std::sync::atomic::AtomicBool);
+        impl Drop for Release {
+            fn drop(&mut self) { self.0.store(false, std::sync::atomic::Ordering::SeqCst); }
+        }
+        let _release = Release(flag);
         work();
-        flag.store(false, Ordering::SeqCst);
     });
 }
 
@@ -158,22 +164,29 @@ fn once_at_a_time(flag: &'static std::sync::atomic::AtomicBool, work: impl FnOnc
 /// back.
 pub(crate) fn tick_proactive(app: &AppHandle) {
     static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let occupied = { let a = app.borrow(); a.busy || a.dragging } || crate::voice::is_recording();
+    let (occupied, generation) = {
+        let a = app.borrow();
+        (a.busy || a.dragging || a.reaction_pending, a.speech_generation)
+    };
+    let occupied = occupied || crate::voice::is_recording() || crate::voice::is_speaking();
+    let started = Instant::now();
     once_at_a_time(&IN_FLIGHT, move || {
         crate::proactive::observe_mood();
         if occupied {
             return;
         }
         let game = crate::desktop::presence::detect_game();
-        let event = crate::proactive::check_for_event().map(|mut event| {
-            // Her own words for it, when the endpoint answers; the script otherwise.
-            if let Some((text, emotion)) = crate::ai::tasks::proactive_line(&event.situation, &event.emotion) {
-                event.message = text;
-                event.emotion = emotion;
-            }
-            event
+        let event = crate::proactive::check_for_event().and_then(|mut event| {
+            let (text, emotion) = crate::ai::tasks::proactive_line(&event.situation, &event.emotion)?;
+            event.message = text;
+            event.emotion = emotion;
+            Some(event)
         });
-        post(move |app| apply_proactive(app, game, event));
+        post(move |app| {
+            let event = event.filter(|_| app.borrow().speech_generation == generation
+                && started.elapsed() < Duration::from_secs(25));
+            apply_proactive(app, game, event);
+        });
     });
 }
 
@@ -271,7 +284,7 @@ pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::pre
 pub(crate) fn tick_music(app: &AppHandle) {
     static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !config::get().music_vibe_enabled {
-        crate::desktop::beat::listen(false, "");
+        crate::desktop::beat::listen(false, "", "");
         if app.borrow().music_vibing {
             app.borrow_mut().music_vibing = false;
             app.borrow().stage.set_music_vibe(false, 0.0, 0.0, 0.0);
@@ -281,7 +294,7 @@ pub(crate) fn tick_music(app: &AppHandle) {
     once_at_a_time(&IN_FLIGHT, || {
         let playing = crate::desktop::media::now_playing();
         // The tracker samples the music app's own meter, so Aria's voice is never the beat.
-        crate::desktop::beat::listen(playing.is_playing, &playing.exe);
+        crate::desktop::beat::listen(playing.is_playing, &playing.exe, &playing.label());
         let beat = crate::desktop::beat::latest();
         post(move |app| apply_music_state(app, playing, beat));
     });
@@ -293,15 +306,9 @@ pub(crate) fn apply_music_state(
     beat: Option<crate::desktop::beat::Music>,
 ) {
     let was = app.borrow().music_vibing;
-    let on = playing.is_playing;
+    let on = playing.is_playing && config::get().music_vibe_enabled;
     if on {
-        // The beat phase is measured "now"; the renderer keeps its own clock running from it.
-        let (energy, bpm, phase) = match beat {
-            Some(b) if b.confidence > 0.0 => (b.energy.max(0.25), b.bpm, b.phase_at(Instant::now())),
-            Some(b) => (b.energy.max(0.25), 0.0, 0.0),
-            None => (0.6, 0.0, 0.0),
-        };
-        app.borrow().stage.set_music_vibe(true, energy, bpm, phase);
+        send_music_levels(app, beat);
     }
     if on != was {
         app.borrow_mut().music_vibing = on;
@@ -314,22 +321,23 @@ pub(crate) fn apply_music_state(
     }
 }
 
-pub(crate) fn tick_boredom(app: &AppHandle) {
-    let (idle, can) = {
-        let a = app.borrow();
-        (a.stationary_since.elapsed().as_secs_f64(), !a.dragging && a.target.is_none() && !a.busy && !a.game_compacted && a.roaming)
+fn send_music_levels(app: &AppHandle, beat: Option<crate::desktop::beat::Music>) {
+    // Compute phase on the UI thread immediately before sending it to the renderer.
+    let (energy, bpm, phase) = match beat {
+        Some(b) if b.confidence >= 0.12 => (b.energy, b.bpm, b.phase_at(Instant::now())),
+        Some(b) => (b.energy, 0.0, 0.0),
+        None => (0.0, 0.0, 0.0),
     };
-    if !can || idle < 210.0 {
-        return;
+    app.borrow().stage.set_music_vibe(true, energy, bpm, phase);
+    if std::env::var_os("ARIA_MUSIC_TRACE").is_some() {
+        static LAST_TRACE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        let mut last = LAST_TRACE.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_none_or(|at| at.elapsed() > Duration::from_secs(3)) {
+            let a = app.borrow();
+            log::info!("music trace: level={energy:.3} bpm={bpm:.1} phase={phase:.2} emotion={} speaking={}", a.last_emotion, crate::voice::is_speaking());
+            *last = Some(Instant::now());
+        }
     }
-    app.borrow_mut().stationary_since = Instant::now();
-    let line = match crate::persona::current_key().as_str() {
-        "yandere" => "I've been watching you from this spot for so long. Let me walk a little closer.",
-        "tomboy" => "Whew, my legs were getting stiff. Let's shake it off with a quick stretch walk.",
-        _ => "Standing in the same spot forever is boring. I'm stretching my legs a bit.",
-    };
-    say(app, &crate::persona::flav(line), "idle", vec!["boredom walk".into()], true);
-    walk_to(app, "roam", "idle");
 }
 
 /// Idle moments: when nothing has happened for a while, she does something on her own (stretch,
@@ -345,6 +353,7 @@ pub(crate) fn tick_idle_events(app: &AppHandle) {
         let a = app.borrow();
         Instant::now() >= a.next_idle_event
             && !a.busy
+            && !a.reaction_pending
             && !a.dragging
             && a.target.is_none()
             && !a.body.is_moving()
@@ -361,10 +370,15 @@ pub(crate) fn tick_idle_events(app: &AppHandle) {
     let pause = idle_pause(&persona);
     app.borrow_mut().next_idle_event = Instant::now() + pause;
     let recent = app.borrow().recent_idle.clone();
+    let generation = app.borrow().speech_generation;
     once_at_a_time(&IN_FLIGHT, move || {
         let activity = describe_activity();
         let event = crate::ai::tasks::idle_event(&activity, &recent).unwrap_or_else(|| crate::ai::tasks::idle_fallback(&persona));
-        post(move |app| apply_idle_event(app, event));
+        post(move |app| {
+            if app.borrow().speech_generation == generation {
+                apply_idle_event(app, event);
+            }
+        });
     });
 }
 
@@ -396,7 +410,12 @@ fn describe_activity() -> String {
 
 fn apply_idle_event(app: &AppHandle, event: crate::ai::tasks::IdleEvent) {
     // Something may have started while the AI was choosing.
-    if app.borrow().busy || app.borrow().ui.get_bubble_shown() || app.borrow().dragging {
+    let occupied = {
+        let a = app.borrow();
+        a.busy || a.reaction_pending || a.ui.get_bubble_shown() || a.dragging || a.target.is_some()
+            || a.body.is_moving() || a.music_vibing || a.game_compacted
+    };
+    if !config::get().idle_events_enabled || occupied || crate::voice::is_speaking() || crate::voice::is_recording() {
         return;
     }
     log::info!("idle moment: {} (walk: {}, line: {:?})", event.action, event.walk, event.line);
@@ -406,9 +425,6 @@ fn apply_idle_event(app: &AppHandle, event: crate::ai::tasks::IdleEvent) {
         if a.recent_idle.len() > 4 {
             a.recent_idle.remove(0);
         }
-    }
-    if event.walk != "none" {
-        walk_to(app, &event.walk, &event.action);
     }
     if event.line.is_empty() {
         // A silent moment: the gesture alone, fading back to idle like any reaction.
@@ -480,6 +496,7 @@ pub(crate) fn tick_hover(app: &AppHandle) {
         hovered
             || a.dragging
             || a.busy
+            || (a.ui.get_editing() && a.ui.window().with_winit_window(|w| w.has_focus()).unwrap_or(false))
             || !a.ui.get_draft().is_empty()
             || crate::voice::is_recording()
             || a.menu.as_ref().is_some_and(|m| m.window().is_visible())

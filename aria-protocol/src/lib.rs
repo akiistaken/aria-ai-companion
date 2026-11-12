@@ -160,6 +160,8 @@ pub enum Event {
         /// Window pixels per metre of model.
         pixels_per_metre: f32,
     },
+    /// Animated crown of the head, normalized to the renderer viewport (top-left is 0,0).
+    HeadAnchor { x: f32, y: f32 },
     DragStart,
     DragMove,
     DragEnd,

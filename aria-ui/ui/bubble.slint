@@ -24,14 +24,27 @@ component BubbleTail inherits Path {
 
 export component SpeechBubble inherits Rectangle {
     in property <string> text: "";
-    in property <length> measure: 300px;
+    in property <string> layout-text: root.text;
+    in property <length> measure: 216px;
+    in property <length> tail-x: root.measure / 2;
 
     width: root.measure;
-    height: 11px + Math.max(38px, label.preferred-height + 22px);
+    height: 11px + Math.max(38px, measure-label.preferred-height + 22px);
+
+    // Reserve the complete reply's wrapped height while the visible text types in.
+    measure-label := Text {
+        width: root.measure - 28px;
+        text: root.layout-text;
+        wrap: word-wrap;
+        font-size: 13px;
+        font-family: Theme.font-ui;
+        line-height-factor: 1.35;
+        visible: false;
+    }
 
     body := Rectangle {
         width: root.measure;
-        height: Math.max(38px, label.preferred-height + 22px);
+        height: root.height - 11px;
         border-radius: Theme.r-lg;
         background: Theme.surface-raised;
         border-width: 1.2px;
@@ -42,9 +55,10 @@ export component SpeechBubble inherits Rectangle {
         drop-shadow-color: #00000088;
 
         label := Text {
-            x: 15px;
+            x: 14px;
             y: 11px;
-            width: parent.width - 30px;
+            width: parent.width - 28px;
+            height: parent.height - 22px;
             text: root.text;
             wrap: word-wrap;
             color: Theme.text;
@@ -53,13 +67,11 @@ export component SpeechBubble inherits Rectangle {
             line-height-factor: 1.35;
             horizontal-alignment: center;
             vertical-alignment: top;
-            overflow: elide;
-            max-height: 160px;
         }
     }
 
     BubbleTail {
-        x: (parent.width - self.width) / 2;
+        x: Math.clamp(root.tail-x - self.width / 2, 12px, parent.width - self.width - 12px);
         y: body.height - 1px;
         tint: Accent.edge;
         fill-tint: Theme.surface-raised;

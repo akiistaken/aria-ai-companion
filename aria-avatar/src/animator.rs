@@ -34,7 +34,8 @@ const EMOTE_BLEND_SECS: f32 = 0.42;
 const HARD_LANDING: f32 = 6.5;
 /// Her own tempo when no music sets one (dancing on request, humming).
 const DEFAULT_BPM: f32 = 122.0;
-/// Above this loudness the music gets a dance, below it a groove.
+const LISTENING_BPM: f32 = 78.0;
+/// Loudness threshold for dancing once a sufficiently fast rhythm is measured.
 const DANCE_ENERGY: f32 = 0.5;
 
 /// A measured beat from the app: tempo, and where in the beat the music is right now.
@@ -55,11 +56,12 @@ pub struct BeatClock {
     target_bpm: f32,
     /// Phase correction still to be taken out, in beats.
     pending: f32,
+    sync_age: f32,
 }
 
 impl Default for BeatClock {
     fn default() -> Self {
-        Self { beats: 0.0, bpm: DEFAULT_BPM, target_bpm: DEFAULT_BPM, pending: 0.0 }
+        Self { beats: 0.0, bpm: DEFAULT_BPM, target_bpm: DEFAULT_BPM, pending: 0.0, sync_age: 10.0 }
     }
 }
 
@@ -67,8 +69,10 @@ impl BeatClock {
     /// Advances by `dt`. `music` says whether music is playing: without it she drifts back to her
     /// own tempo.
     pub fn step(&mut self, dt: f32, sync: Option<BeatSync>, music: bool) {
-        if let Some(sync) = sync {
-            self.target_bpm = sync.bpm.clamp(60.0, 200.0);
+        self.sync_age += dt;
+        if let Some(sync) = sync.filter(|s| s.bpm.is_finite() && s.phase.is_finite()) {
+            self.sync_age = 0.0;
+            self.target_bpm = sync.bpm.clamp(45.0, 200.0);
             // Phase error, wrapped to the nearer beat, measured against where the clock will be
             // once the corrections still pending are in.
             let have = (self.beats as f32 + self.pending).rem_euclid(1.0);
@@ -76,11 +80,17 @@ impl BeatClock {
         }
         if !music {
             self.target_bpm = DEFAULT_BPM;
+            self.sync_age = 10.0;
+            self.pending = 0.0;
+        } else if self.sync_age > 2.0 {
+            self.target_bpm = LISTENING_BPM;
+            self.pending = 0.0;
         }
         // Tempo eases toward the target (a jump would make every step lurch).
         self.bpm += (self.target_bpm - self.bpm) * crate::spring::approach_factor(1.5, dt);
         // The correction goes in over about a quarter of a second: a nudge, never a skip.
-        let take = self.pending * crate::spring::approach_factor(4.0, dt);
+        let advance = dt * self.bpm / 60.0;
+        let take = (self.pending * crate::spring::approach_factor(4.0, dt)).clamp(-advance * 0.5, advance * 0.5);
         self.pending -= take;
         self.beats += (dt * self.bpm / 60.0 + take) as f64;
     }
@@ -101,8 +111,8 @@ pub struct Input {
     pub speech: Speech,
     /// Loudness of the music she is listening to, when there is any.
     pub music: f32,
-    /// The emotion is only "music is playing" (nothing else asked for), so she may dance or groove
-    /// as the music's loudness suggests.
+    pub music_active: bool,
+    /// Nothing else was asked for, so tempo and level choose between rest, groove and dance.
     pub music_fill: bool,
     /// A fresh beat measurement this frame.
     pub sync: Option<BeatSync>,
@@ -170,6 +180,7 @@ pub struct Animator {
     beat: BeatClock,
     /// Music fill-in: dancing (true) or grooving, with hysteresis on the loudness.
     music_dancing: bool,
+    music_energy: f32,
     /// The upper body as last shown, for the follow-through filter.
     shown: Option<Pose>,
 }
@@ -205,6 +216,7 @@ impl Default for Animator {
             drop: 0.0,
             beat: BeatClock::default(),
             music_dancing: false,
+            music_energy: 0.0,
             shown: None,
         }
     }
@@ -293,15 +305,23 @@ impl Animator {
         shown
     }
 
-    /// With music playing and nothing else going on: dance when it is loud, groove when it is
-    /// soft, with a little hysteresis so a quiet bar does not flip her back and forth.
+    /// Loud, fast, measured music gets a dance; slow or uncertain music gets a groove.
+    /// Tempo and level both have hysteresis to avoid switching at a threshold every frame.
     fn music_emote(&mut self, input: &Input) -> Emote {
         if !input.music_fill {
             self.music_dancing = false;
+            if input.music_active && input.emote == Emote::Dance && self.beat.target_bpm < 94.0 {
+                return Emote::Groove;
+            }
             return input.emote;
         }
         let threshold = if self.music_dancing { DANCE_ENERGY - 0.1 } else { DANCE_ENERGY + 0.05 };
-        self.music_dancing = input.music >= threshold;
+        let tempo_threshold = if self.music_dancing { 94.0 } else { 104.0 };
+        self.music_dancing = self.music_energy >= threshold
+            && self.beat.target_bpm >= tempo_threshold && self.beat.sync_age < 2.0;
+        if self.music_energy < 0.025 {
+            return Emote::Idle;
+        }
         if self.music_dancing {
             Emote::Dance
         } else {
@@ -312,6 +332,8 @@ impl Animator {
     /// Evaluates the current emotion, cross-fading from the previous one.
     fn act(&mut self, rig: &Rig, input: &Input, t: f32, dt: f32) -> Act {
         self.stun = (self.stun - dt).max(0.0);
+        self.beat.step(dt, input.sync, input.music_active);
+        self.music_energy = approach(self.music_energy, input.music.clamp(0.0, 1.0), 5.0, dt);
         let chosen = self.music_emote(input);
         let wanted = if self.stun > 0.0 { Emote::Dizzy } else { chosen };
         if wanted != self.emote {
@@ -322,7 +344,6 @@ impl Animator {
         }
         self.emote_time += dt;
         self.blend = (self.blend + dt / EMOTE_BLEND_SECS).min(1.0);
-        self.beat.step(dt, input.sync, input.music_fill || input.sync.is_some());
 
         let ctx = Ctx {
             rig,
@@ -330,8 +351,9 @@ impl Animator {
             e: self.emote_time,
             style: input.style,
             talk: self.talk,
-            energy: input.music,
+            energy: self.music_energy,
             beat: self.beat.beat(),
+            bpm: self.beat.bpm,
         };
         let mut act = emotes::act(self.emote, &ctx);
         if self.blend >= 1.0 {
@@ -451,7 +473,7 @@ impl Animator {
             pose.spine(0.05 * walk + 0.16 * run, -twist * 1.6, -roll * 0.9);
             // The head stays level and steady against the trunk, with a small nod each step.
             pose.head(0.035 * walk * (lift - 0.5), twist * 0.9, roll * 0.6);
-            let lead = ((local[right].y - local[left].y) / leg * 1.35).clamp(-0.8, 0.8);
+            let lead = ((local[right].y - local[left].y) / leg * 1.0).clamp(-0.6, 0.6);
             let mut arms = Pose::default();
             for side in Side::BOTH {
                 let swing = lead * side.sign();
@@ -464,7 +486,7 @@ impl Animator {
                         swing,
                         yaw: 0.0,
                         twist: 0.3,
-                        bend: 0.3 + 0.45 * swing.max(0.0) + 1.0 * run,
+                        bend: 0.28 + 0.32 * swing.max(0.0) + 0.12 * lift + 0.85 * run,
                         pronate: 0.0,
                     },
                 );
@@ -745,6 +767,7 @@ mod tests {
             look: Vec2::ZERO,
             speech: Speech::default(),
             music: 0.0,
+            music_active: false,
             music_fill: false,
             sync: None,
             headpat: 0.0,
@@ -773,16 +796,52 @@ mod tests {
     }
 
     #[test]
+    fn slow_beats_never_reverse_and_explicit_dance_keeps_the_music_tempo() {
+        let mut clock = BeatClock::default();
+        for i in 0..600 {
+            let before = clock.beats;
+            clock.step(DT, (i % 3 == 0).then_some(BeatSync { bpm: 45.0, phase: 0.7 }), true);
+            assert!(clock.beats >= before, "phase correction must never reverse a movement");
+        }
+        let rig = Rig::synthetic(&[]);
+        let mut animator = Animator::default();
+        let mut music = input(Emote::Dance, BodyMode::Ground);
+        music.music_active = true;
+        music.music = 0.9;
+        for i in 0..360 {
+            music.sync = (i % 30 == 0).then_some(BeatSync { bpm: 65.0, phase: (i as f32 * DT * 65.0 / 60.0).fract() });
+            animator.act(&rig, &music, i as f32 * DT, DT);
+        }
+        assert!((animator.beat.bpm - 65.0).abs() < 0.1);
+        assert_eq!(animator.emote, Emote::Groove);
+        music.music_fill = true;
+        music.sync = None;
+        for i in 0..300 { animator.act(&rig, &music, 6.0 + i as f32 * DT, DT); }
+        assert_eq!(animator.emote, Emote::Groove, "lost rhythm stays calm");
+        music.music_active = false;
+        music.music_fill = false;
+        for i in 0..300 { animator.act(&rig, &music, 11.0 + i as f32 * DT, DT); }
+        assert!((animator.beat.bpm - DEFAULT_BPM).abs() < 0.1);
+    }
+
+    #[test]
     fn loud_music_gets_a_dance_and_soft_music_a_groove() {
         let mut animator = Animator::default();
         let mut music = input(Emote::Groove, BodyMode::Ground);
         music.music_fill = true;
-        music.music = 0.8;
+        animator.beat.target_bpm = 120.0;
+        animator.beat.sync_age = 0.0;
+        animator.music_energy = 0.8;
         assert_eq!(animator.music_emote(&music), Emote::Dance);
-        music.music = 0.48;
+        animator.music_energy = 0.48;
         assert_eq!(animator.music_emote(&music), Emote::Dance, "hysteresis keeps her dancing through a quiet bar");
-        music.music = 0.2;
+        animator.music_energy = 0.2;
         assert_eq!(animator.music_emote(&music), Emote::Groove);
+        animator.music_energy = 1.0;
+        animator.beat.target_bpm = 65.0;
+        assert_eq!(animator.music_emote(&music), Emote::Groove, "loud ballads still groove");
+        animator.music_energy = 0.0;
+        assert_eq!(animator.music_emote(&music), Emote::Idle, "silence rests");
         let asked = input(Emote::Sad, BodyMode::Ground);
         assert_eq!(animator.music_emote(&asked), Emote::Sad, "an explicit emotion beats the music");
     }

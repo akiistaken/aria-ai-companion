@@ -281,11 +281,10 @@ pub fn pump_link(
             Command::SetPeeking { side } => state.peeking = side,
             Command::SetMusicVibe { active, energy, bpm, beat } => {
                 state.music_active = active;
-                state.music_energy = energy;
+                state.music_energy = if energy.is_finite() { energy.clamp(0.0, 1.0) } else { 0.0 };
                 // A measured beat re-syncs her beat clock; no tempo means "keep your own".
-                if active && bpm > 0.0 {
-                    state.music_sync = Some(crate::animator::BeatSync { bpm, phase: beat });
-                }
+                state.music_sync = (active && bpm.is_finite() && bpm > 0.0 && beat.is_finite())
+                    .then_some(crate::animator::BeatSync { bpm, phase: beat });
             }
             Command::TriggerHeadpat => {
                 state.headpat_active = 1.0;

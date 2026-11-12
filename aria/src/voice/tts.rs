@@ -284,25 +284,6 @@ pub fn speak_async(text: &str, emotion: &str) {
     });
 }
 
-/// Pre-warms the cache with the lines most likely to be spoken on startup.
-pub fn precache(lines: Vec<(String, String)>) {
-    let voice_key = crate::config::get().tts_voice;
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        for (raw, emotion) in lines {
-            if SHUTTING_DOWN.load(Ordering::SeqCst) {
-                break;
-            }
-            let spoken = format_speech(&raw, &voice_key);
-            let target = cache_file(&spoken, &voice_key, &emotion);
-            if !spoken.is_empty() && !target.exists() {
-                synthesize(&spoken, &emotion, &voice_key, &target);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(350));
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

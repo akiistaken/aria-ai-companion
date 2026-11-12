@@ -7,31 +7,16 @@ pub(crate) fn headpat(app: &AppHandle) {
     let stat = crate::memory::adjust_emotion("dere", 5);
     crate::memory::adjust_emotion("devotion", 2);
     app.borrow().stage.trigger_headpat();
-    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "headpat", 0.35);
-    say(
-        app,
-        &line,
-        "happy",
-        vec![format!(
-            "headpat, dere level {} ({})",
-            stat.level, stat.tier
-        )],
-        true,
-    );
+    log::info!("headpat, dere level {} ({})", stat.level, stat.tier);
+    react(app, "The user gently patted your head. React to the affection.", "happy");
     sync_studio(app);
 }
 
 pub(crate) fn poke(app: &AppHandle) {
     crate::persona::mood::note_event("poke");
     let stat = crate::memory::adjust_emotion("tsun", 5);
-    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "poke", 0.32);
-    say(
-        app,
-        &line,
-        "annoyed",
-        vec![format!("poked, tsun level {} ({})", stat.level, stat.tier)],
-        true,
-    );
+    log::info!("poked, tsun level {} ({})", stat.level, stat.tier);
+    react(app, "The user just poked you. Give a fresh, playful reaction to this poke.", "annoyed");
     sync_studio(app);
 }
 
@@ -39,14 +24,8 @@ pub(crate) fn shake(app: &AppHandle) {
     crate::persona::mood::note_event("shake");
     crate::memory::adjust_emotion("tsun", 4);
     let stat = crate::memory::adjust_emotion("hype", 3);
-    let line = crate::persona::reactions::pick(&crate::persona::current_key(), "shake", 0.32);
-    say(
-        app,
-        &line,
-        "dizzy",
-        vec![format!("shaken, hype level {}", stat.level)],
-        true,
-    );
+    log::info!("shaken, hype level {}", stat.level);
+    react(app, "The user picked you up and shook you. React to being dizzy.", "dizzy");
     sync_studio(app);
 }
 
@@ -96,7 +75,7 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
                 stage.set_body(a.body.mode);
                 stage.set_mood(&a.persona);
                 stage.set_peeking(&a.peeking);
-                stage.set_music_vibe(a.music_vibing, 0.6, 0.0, 0.0);
+                stage.set_music_vibe(a.music_vibing, 0.0, 0.0, 0.0);
             }
             apply_render_policy(app);
             layout_windows(app);
@@ -144,6 +123,15 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             log::info!("avatar stage: feet {ground_offset:.0} px above the slot bottom, {pixels_per_metre:.0} px/m");
             app.borrow_mut().stage_geometry = Some((ground_offset, pixels_per_metre.max(1.0)));
         }
+        Event::HeadAnchor { x, y } if x.is_finite() && y.is_finite() => {
+            {
+                let a = app.borrow();
+                a.ui.set_head_x(x.clamp(0.0, 1.0));
+                a.ui.set_head_y(y.clamp(0.0, 1.0));
+            }
+            cut_stage_hole(app);
+        }
+        Event::HeadAnchor { .. } => {}
         Event::Error { msg } => log::error!("avatar error: {msg}"),
     }
 }
