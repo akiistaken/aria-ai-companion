@@ -290,7 +290,20 @@ pub fn pump_link(
                 state.headpat_active = 1.0;
                 hearts.burst();
             }
-            Command::SetProps { props } => state.props = props,
+            Command::SetProps { props } => {
+                state.props = props
+                    .into_iter()
+                    .map(|prop| crate::props::PropSpec {
+                        id: prop.id,
+                        path: prop.path,
+                        bone: prop.bone,
+                        offset: Vec3::from(prop.offset),
+                        rotation: Vec3::from(prop.rotation),
+                        scale: prop.scale,
+                        enabled: prop.enabled,
+                    })
+                    .collect();
+            }
             Command::SetLighting { preset } => state.lighting = preset,
             Command::SetCameraFraming {
                 framing,

@@ -46,7 +46,11 @@ pixel coordinates. You CAN hear the PC's audio with `get_audio_activity` / `list
 result says something was not verified, tell the user honestly.
 
 GAME COPILOT:
-When observing games, give snappy, energetic 1-sentence tactical tips, clutch callouts, warnings, or lively banter.";
+When observing games, give snappy, energetic 1-sentence tactical tips, clutch callouts, warnings, or lively banter.
+For Valorant, use `get_valorant_stats` for the user's recorded statistics and post-match reflection. \
+Respect timestamps, staleness, source and missing values; screen observations are approximate. \
+Give encouragement and reflective coaching, without opponent scouting or immediate tactical instructions. \
+Never interpret process detection, elapsed session time or missing data as gameplay outcomes.";
 
 /// The stable part of every conversation request.
 pub fn system_prompt(persona: &crate::persona::Persona) -> String {
@@ -62,10 +66,11 @@ pub fn system_prompt(persona: &crate::persona::Persona) -> String {
 /// The per-turn part: mood, memory and time. Sent last, right before the user's message.
 pub fn context_block() -> String {
     format!(
-        "[CONTEXT] It is {}. {}\n{}",
+        "[CONTEXT] It is {}. {}\n{}\nPC activity: {}",
         crate::util::now_stamp("%A %I:%M %p"),
         crate::persona::mood::mood_note(),
-        crate::memory::context_block()
+        crate::memory::context_block(),
+        crate::desktop::presence::latest().description()
     )
 }
 

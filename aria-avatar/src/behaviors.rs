@@ -1,8 +1,6 @@
 //! Avatar behaviour: what the app has asked for, the model's lifecycle, and the system that runs
 //! the animator and writes its result into the scene.
 
-use std::collections::BTreeMap;
-
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{Initialized, LookAt, VrmHandle};
 
@@ -42,7 +40,8 @@ pub struct AvatarState {
     pub music_energy: f32,
     /// A beat measurement waiting for the animator's beat clock.
     pub music_sync: Option<crate::animator::BeatSync>,
-    pub props: BTreeMap<String, bool>,
+    /// Wardrobe props loaded from the user's own files.
+    pub props: Vec<crate::props::PropSpec>,
     pub lighting: String,
     pub framing: String,
     pub zoom: f32,
@@ -68,7 +67,6 @@ pub struct AvatarState {
     // ---- Model ----
     pub root: Option<Entity>,
     pub rig: Option<Rig>,
-    props_pending: bool,
     load_handle: Option<Handle<bevy::gltf::Gltf>>,
     loading_path: String,
     pub look_target: Option<Entity>,
@@ -91,7 +89,7 @@ impl Default for AvatarState {
             music_active: false,
             music_energy: 0.0,
             music_sync: None,
-            props: BTreeMap::new(),
+            props: Vec::new(),
             lighting: "auto".into(),
             framing: "full".into(),
             zoom: 1.0,
@@ -107,7 +105,6 @@ impl Default for AvatarState {
             head_reported: None,
             root: None,
             rig: None,
-            props_pending: false,
             load_handle: None,
             loading_path: String::new(),
             look_target: None,
@@ -247,7 +244,6 @@ pub fn resolve_rig(world: &mut World) {
     {
         let mut state = world.resource_mut::<AvatarState>();
         state.rig = Some(rig);
-        state.props_pending = true;
         state.load_handle = None;
         // A different model stands differently in the frame.
         state.stage_reported = None;
@@ -260,19 +256,10 @@ pub fn resolve_rig(world: &mut World) {
 }
 
 /// Builds the wardrobe for a newly resolved rig.
-pub fn build_props(
-    mut state: ResMut<AvatarState>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    if !state.props_pending {
-        return;
-    }
-    state.props_pending = false;
-    if let Some(rig) = state.rig.as_ref() {
-        crate::props::build_props(rig, &mut commands, &mut meshes, &mut materials);
-    }
+pub fn forget_props(mut props: ResMut<crate::props::Props>) {
+    // Every prop was spawned under the old model's bones; the entities go with the model, but
+    // the record of what was built has to forget them or nothing would be rebuilt.
+    props.built.clear();
 }
 
 /// The per-frame animation pass: measure the window, run the animator, write the result.
@@ -356,8 +343,7 @@ pub fn animate(
             headpat: s.headpat_active,
             peeking: s.peeking,
         };
-        let mut frame = animator.step(rig, &input, t, dt);
-        crate::props::hold_props(rig, &mut frame.pose, &s.props);
+        let frame = animator.step(rig, &input, t, dt);
         {
             let mut transforms = parts.p2();
             rig.apply(&frame.pose, &mut transforms);
@@ -378,12 +364,7 @@ pub fn animate(
     if let Some((rig, frame)) = s.rig.as_ref().zip(frame.as_ref()) {
         let fk = rig.fk(&frame.pose);
         let head = crate::rig::Bone::Head.index();
-        let mut crown = rig.metrics.height - rig.rest(crate::rig::Bone::Head).y;
-        for (prop, height) in [("witch_hat", 0.50), ("halo", 0.31), ("cat_ears", 0.26), ("devil_horns", 0.30)] {
-            if s.props.get(prop).copied().unwrap_or(false) {
-                crown = crown.max(height * rig.metrics.unit);
-            }
-        }
+        let crown = rig.metrics.height - rig.rest(crate::rig::Bone::Head).y;
         let point = frame.root.transform_point(fk.pos[head] + fk.rot[head] * Vec3::Y * crown);
         let eye_y = framing.target_y - drop * framing.follow;
         let focal = s.viewport.1 as f32 / (2.0 * (crate::FOV_DEGREES.to_radians() * 0.5).tan());

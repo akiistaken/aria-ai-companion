@@ -249,7 +249,7 @@ impl AvatarLink {
         self.send(Command::TriggerHeadpat);
     }
 
-    pub fn set_props(&self, props: std::collections::BTreeMap<String, bool>) {
+    pub fn set_props(&self, props: Vec<aria_protocol::PropSpec>) {
         self.send(Command::SetProps { props });
     }
 

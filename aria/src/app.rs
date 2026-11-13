@@ -34,6 +34,7 @@ mod menus;
 mod physics;
 mod studio;
 mod ticks;
+mod valorant;
 
 pub(crate) use avatar::*;
 pub(crate) use body::*;
@@ -71,7 +72,7 @@ pub struct App {
     pub clipboard_watch: bool,
     pub last_clipboard: String,
     pub game_compacted: bool,
-    pub pre_game_scale: f32,
+    pub foreground_game: Option<crate::desktop::presence::Game>,
     pub pre_game_pos: Option<(i32, i32)>,
     pub last_copilot_vision: Instant,
     pub busy: bool,
@@ -250,7 +251,7 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         clipboard_watch: true,
         last_clipboard: String::new(),
         game_compacted: false,
-        pre_game_scale: 1.0,
+        foreground_game: None,
         pre_game_pos: None,
         last_copilot_vision: Instant::now(),
         busy: false,

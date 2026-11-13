@@ -16,10 +16,13 @@ pub const RATE: f32 = 50.0;
 const WINDOW_SECS: f32 = 8.0;
 const MIN_BPM: f32 = 45.0;
 const MAX_BPM: f32 = 180.0;
+/// How long a locked tempo survives without a fresh measurement. A quiet bar, a breakdown or a
+/// metadata hiccup must not drop her back to a slow sway in the middle of a song.
+const HOLD: Duration = Duration::from_secs(8);
 /// Tempo prior: most dance music sits near 120 BPM; this resolves half/double-tempo ambiguity.
 const PRIOR_BPM: f32 = 120.0;
 /// Below this autocorrelation strength the tempo is a guess and is not reported.
-const MIN_CONFIDENCE: f32 = 0.12;
+pub const MIN_CONFIDENCE: f32 = 0.12;
 
 /// The beat estimate published to the app.
 #[derive(Debug, Clone, Copy)]
@@ -49,12 +52,14 @@ pub struct BeatTracker {
     last_peak: f32,
     slow: f32,
     power: f32,
+    /// The loudest power seen recently, for the automatic gain below.
+    gain: f32,
     pub energy: f32,
 }
 
 impl Default for BeatTracker {
     fn default() -> Self {
-        Self { onsets: std::collections::VecDeque::new(), last_peak: 0.0, slow: 0.0, power: 0.0, energy: 0.0 }
+        Self { onsets: std::collections::VecDeque::new(), last_peak: 0.0, slow: 0.0, power: 0.0, gain: 0.0, energy: 0.0 }
     }
 }
 
@@ -74,8 +79,18 @@ impl BeatTracker {
         // Quick attack and a longer release preserve accents without flickering the face.
         let power = peak * peak;
         self.power += (power - self.power) * if power > self.power { 0.22 } else { 0.045 };
+        // Track the loudest the song has been recently. Session meters are uncalibrated: what a
+        // quiet master delivers at -40 dBFS a loud one delivers at -14, and judging both on
+        // absolute level is why some songs never reached the point of dancing.
+        self.gain += (power - self.gain) * if power > self.gain { 0.35 } else { 0.0025 };
         let dbfs = 10.0 * self.power.max(1e-12).log10();
-        self.energy = ((dbfs + 48.0) / 42.0).clamp(0.0, 1.0);
+        let absolute = ((dbfs + 54.0) / 48.0).clamp(0.0, 1.0);
+        // How loud this is against the song's own recent peak: 1 at its loudest passages.
+        let relative = (self.power / self.gain.max(1e-9)).clamp(0.0, 1.0);
+        // Absolute level sets whether there is anything to hear at all (so real silence is
+        // exactly 0 and a hiss is not "loud"); within the song, its own peak sets the scale,
+        // so a quiet master still gets everything from a groove to a full dance.
+        self.energy = absolute.sqrt() * (0.35 + 0.65 * relative);
         self.onsets.push_back(onset);
         if self.onsets.len() > Self::capacity() {
             self.onsets.pop_front();
@@ -153,13 +168,17 @@ impl BeatTracker {
 struct RhythmLock {
     stable: Option<(f32, f32)>,
     candidate: Option<(f32, u8)>,
-    missing: u8,
+    /// How long the tempo has gone unmeasured. Silence, a spoken interlude or a breakdown ends a
+    /// rhythm; a quiet bar or a lost estimate does not.
+    missing_for: Duration,
 }
 
 impl RhythmLock {
-    fn update(&mut self, measured: Option<(f32, f32)>) -> Option<(f32, f32)> {
+    /// `dt` is how much audio the measurement covers; misses accumulate real time, not counts,
+    /// so a change in how often estimates arrive cannot change the lock's patience.
+    fn update(&mut self, measured: Option<(f32, f32)>, dt: Duration) -> Option<(f32, f32)> {
         if let Some((bpm, confidence)) = measured.filter(|(b, c)| b.is_finite() && *c >= MIN_CONFIDENCE) {
-            self.missing = 0;
+            self.missing_for = Duration::ZERO;
             if let Some((previous, _)) = self.stable {
                 if (bpm / previous - 1.0).abs() < 0.08 {
                     self.stable = Some((previous + 0.25 * (bpm - previous), confidence));
@@ -178,8 +197,11 @@ impl RhythmLock {
             }
         } else {
             self.candidate = None;
-            self.missing += 1;
-            if self.missing >= 6 { self.stable = None; self.missing = 6; }
+            self.missing_for += dt;
+            // Only genuine quiet ends a rhythm; a breakdown or a failed estimate keeps the tempo.
+            if self.missing_for >= HOLD {
+                self.stable = None;
+            }
         }
         self.stable
     }
@@ -190,16 +212,35 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static LATEST: Mutex<Option<Music>> = Mutex::new(None);
 /// The exe of the app playing music, so other apps' sounds (and Aria's own voice) are ignored.
 static SOURCE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+/// Set when the song or the app changed, so the worker starts the new one from a clean slate.
+static RESET: AtomicBool = AtomicBool::new(false);
 
 /// Starts or pauses beat tracking. `source_exe` is the music app (`spotify.exe`, `chrome.exe`),
-/// or empty for "any app but Aria". A new track label resets the old song's beat history.
+/// or empty for "any app but Aria". A new track starts the old song's beat history over.
+///
+/// An empty track label is *not* a new song. Media metadata is queried with a timeout and
+/// occasionally comes back blank while the music plays on, so treating that as a new track threw
+/// the tempo away mid-song and left her swaying until it locked again.
 pub fn listen(on: bool, source_exe: &str, track: &str) {
-    let next = (source_exe.to_lowercase(), track.to_string());
+    let exe = source_exe.to_lowercase();
+    let track = track.trim();
     let mut source = SOURCE.lock().unwrap_or_else(|e| e.into_inner());
-    if *source != next {
-        *source = next;
+    let changed = if exe != source.0 {
+        true
+    } else if track.is_empty() {
+        // A blank label means "still the same song, metadata unavailable this poll".
+        false
+    } else {
+        // Extras after the title (a "(Remastered)" suffix appearing late) are not a new song.
+        let same = !source.1.is_empty() && (source.1.contains(track) || track.contains(source.1.as_str()));
+        !same
+    };
+    if changed {
+        source.1 = if track.is_empty() { String::new() } else { track.to_string() };
         *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        RESET.store(true, Ordering::SeqCst);
     }
+    source.0 = exe;
     drop(source);
     LISTENING.store(on, Ordering::Relaxed);
     if !on {
@@ -227,7 +268,6 @@ fn run() {
     let mut last_estimate = Instant::now();
     let mut estimate = None;
     let mut rhythm = RhythmLock::default();
-    let mut previous_source = (String::new(), String::new());
     let tick = Duration::from_secs_f32(1.0 / RATE);
     // Keep one worker alive across pause/resume, avoiding a lost restart while it exits.
     loop {
@@ -240,12 +280,13 @@ fn run() {
         }
         let started = Instant::now();
         let source = SOURCE.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if source != previous_source {
+        // A new song starts from scratch; a metadata hiccup flags nothing, so the tempo it had
+        // found carries over instead of being re-acquired every poll.
+        if RESET.swap(false, Ordering::SeqCst) {
             tracker = BeatTracker::default();
             rhythm = RhythmLock::default();
             estimate = None;
-            meters = None;
-            previous_source = source.clone();
+            last_estimate = Instant::now();
         }
         // New players appear and old ones go; re-enumerate the sessions every few seconds.
         if meters.as_ref().is_none_or(|m| m.age() > Duration::from_secs(4)) {
@@ -262,15 +303,21 @@ fn run() {
         });
         tracker.push(peak);
         if last_estimate.elapsed() >= Duration::from_millis(500) {
+            let took = last_estimate.elapsed();
             last_estimate = Instant::now();
-            if tracker.energy < 0.025 { rhythm = RhythmLock::default(); }
-            estimate = rhythm.update(tracker.tempo()).map(|(bpm, confidence)| {
+            // A quiet passage keeps the tempo it already found: silence ends a rhythm after
+            // `HOLD`, but a breath between bars, a breakdown or a spoken intro does not. This
+            // used to reset the lock on the first quiet sample, which is why she dropped from
+            // dancing to a slow sway at random points in a song.
+            estimate = rhythm.update(tracker.tempo(), took).map(|(bpm, confidence)| {
                 let ago = tracker.beat_offset(bpm) / RATE;
                 (bpm, confidence, started - Duration::from_secs_f32(ago))
             });
         }
-        // Publish the level at meter speed; tempo estimation is the slower operation.
-        let (bpm, confidence, beat_at) = estimate.unwrap_or((78.0, 0.0, started));
+        // Publish the level at meter speed; tempo estimation is the slower operation. Before the
+        // first lock there is no tempo at all (0) rather than a made-up one: reporting a default
+        // 78 BPM left her swaying through fast songs she had not locked onto yet.
+        let (bpm, confidence, beat_at) = estimate.unwrap_or((0.0, 0.0, started));
         let music = Music { bpm, confidence, beat_at, energy: tracker.energy };
         let current_source = SOURCE.lock().unwrap_or_else(|e| e.into_inner());
         if LISTENING.load(Ordering::Relaxed) && *current_source == source {
@@ -341,16 +388,30 @@ mod tests {
     #[test]
     fn real_mix_confidence_can_lock_without_chasing_half_tempo_outliers() {
         let mut rhythm = RhythmLock::default();
-        assert!(rhythm.update(Some((121.0, 0.16))).is_none());
-        assert!(rhythm.update(Some((120.0, 0.18))).is_none());
-        assert!((rhythm.update(Some((120.5, 0.17))).unwrap().0 - 120.5).abs() < 1.0);
-        assert!(rhythm.update(Some((80.0, 0.2))).unwrap().0 > 119.0);
-        assert!(rhythm.update(None).unwrap().0 > 119.0, "a quiet break preserves tempo");
-        rhythm.update(Some((65.0, 0.2)));
-        rhythm.update(Some((64.5, 0.18)));
-        assert!((rhythm.update(Some((65.0, 0.17))).unwrap().0 - 65.0).abs() < 1.0);
-        for _ in 0..6 { rhythm.update(None); }
+        let step = Duration::from_millis(500);
+        assert!(rhythm.update(Some((121.0, 0.16)), step).is_none());
+        assert!(rhythm.update(Some((120.0, 0.18)), step).is_none());
+        assert!((rhythm.update(Some((120.5, 0.17)), step).unwrap().0 - 120.5).abs() < 1.0);
+        assert!(rhythm.update(Some((80.0, 0.2)), step).unwrap().0 > 119.0);
+        assert!(rhythm.update(None, step).unwrap().0 > 119.0, "a quiet break preserves tempo");
+        rhythm.update(Some((65.0, 0.2)), step);
+        rhythm.update(Some((64.5, 0.18)), step);
+        assert!((rhythm.update(Some((65.0, 0.17)), step).unwrap().0 - 65.0).abs() < 1.0);
+        for _ in 0..(HOLD.as_millis() as usize / 500) { rhythm.update(None, step); }
         assert!(rhythm.stable.is_none(), "a lost rhythm eventually releases");
+    }
+
+    #[test]
+    fn a_dropout_in_the_metadata_does_not_start_the_song_again() {
+        // Two seconds without metadata (a slow WinRT query) must not throw the tempo away.
+        let mut rhythm = RhythmLock::default();
+        let step = Duration::from_millis(500);
+        for _ in 0..3 { rhythm.update(Some((128.0, 0.2)), step); }
+        assert!(rhythm.stable.is_some());
+        for _ in 0..4 {
+            let kept = rhythm.update(None, step).expect("the tempo survives a short gap");
+            assert!((kept.0 - 128.0).abs() < 2.0);
+        }
     }
 
     #[test]
@@ -400,18 +461,28 @@ mod tests {
     }
 
     #[test]
-    fn loudness_is_logarithmic_and_silence_settles_to_zero() {
-        let level = |db: f32| {
-            let mut tracker = BeatTracker::default();
-            for _ in 0..200 { tracker.push(10f32.powf(db / 20.0)); }
-            tracker.energy
-        };
-        assert!((level(-27.0) - 0.5).abs() < 0.01);
-        assert!(level(-42.0) < level(-30.0) && level(-30.0) < level(-12.0));
+    fn loudness_follows_the_song_and_silence_is_silent() {
+        // Within one song, a loud passage reads higher than a quiet one.
         let mut tracker = track(120.0, 8.0, true);
+        let loud = tracker.energy;
         for _ in 0..300 { tracker.push(0.0); }
-        assert_eq!(tracker.energy, 0.0);
+        assert_eq!(tracker.energy, 0.0, "real silence is exactly zero");
+        assert!(loud > 0.3, "an audible kick drum reads as audible: {loud}");
         tracker.push(f32::NAN);
         assert!(tracker.energy.is_finite());
+
+        // A quietly mastered song must still register: the same rhythm at a quarter of the
+        // level is what used to fall under the dance threshold.
+        let quiet = {
+            let mut tracker = BeatTracker::default();
+            let period = 60.0 / 120.0;
+            for i in 0..(8.0 * RATE) as usize {
+                let t = i as f32 / RATE;
+                let since = t.rem_euclid(period);
+                tracker.push(0.25 * (0.15 + 0.5 * (-since / 0.12).exp()));
+            }
+            tracker.energy
+        };
+        assert!(quiet > 0.25, "a quiet master still reads as audible: {quiet}");
     }
 }

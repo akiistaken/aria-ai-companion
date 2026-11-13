@@ -1,4 +1,4 @@
-﻿{
+{
     "deepseek_api_key":  "",
     "gemini_api_key":  "",
     "base_url":  "https://api.sailresearch.com/v1",
@@ -13,19 +13,14 @@
     "avatar_mode":  "live2d",
     "avatar_scale":  2.0,
     "avatar_props":  {
-                         "angel_wings":  false,
-                         "cat_ears":  true,
-                         "coffee_mug":  false,
-                         "cyber_sword":  false,
-                         "devil_horns":  false,
-                         "fox_tail":  false,
-                         "game_controller":  false,
-                         "glasses":  false,
-                         "halo":  true,
-                         "headset":  true,
-                         "smartphone":  false,
-                         "sunglasses":  false,
-                         "witch_hat":  false
+                         "C:/Users/you/props/witch_hat.glb":  {
+                                                                   "path":  "C:/Users/you/props/witch_hat.glb",
+                                                                   "bone":  "head",
+                                                                   "offset":  [0.0, 0.14, 0.0],
+                                                                   "rotation":  [0.0, 0.0, 0.0],
+                                                                   "scale":  1.0,
+                                                                   "enabled":  true
+                                                               }
                      },
     "body_framing":  "full",
     "camera_zoom":  1.0,
@@ -53,6 +48,10 @@
     "presence_guardian_enabled":  true,
     "automatic_game_copilot_enabled":  true,
     "smart_gaming_dodge_enabled":  true,
+    "valorant_enabled":  false,
+    "valorant_capture_interval_secs":  60,
+    "valorant_test_riot_id":  "",
+    "valorant_test_region":  "ap",
     "edge_snapping_enabled":  true,
     "discord_presence_enabled":  false,
     "voice_follows_mood":  true,

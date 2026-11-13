@@ -148,10 +148,5 @@ pub(crate) fn apply_avatar_settings(app: &AppHandle) {
         settings.camera_y_offset,
     );
     stage.set_lighting(&settings.stage_lighting);
-    let props = settings
-        .avatar_props
-        .iter()
-        .filter_map(|(k, v)| v.as_bool().map(|on| (k.clone(), on)))
-        .collect();
-    stage.set_props(props);
+    stage.set_props(crate::wardrobe::all(&settings));
 }

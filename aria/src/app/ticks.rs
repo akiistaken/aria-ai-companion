@@ -14,6 +14,8 @@ pub(crate) fn own_timer(app: AppHandle, interval: Duration, f: impl Fn() + 'stat
 pub(crate) const MOTION_TICK: Duration = Duration::from_millis(16);
 
 pub(crate) fn start_timers(app: &AppHandle) {
+    tick_activity();
+    own_timer(app.clone(), Duration::from_secs(2), tick_activity);
     {
         let app = app.clone();
         own_timer(app.clone(), MOTION_TICK, move || {
@@ -66,7 +68,7 @@ pub(crate) fn start_timers(app: &AppHandle) {
     }
     {
         let app = app.clone();
-        own_timer(app.clone(), Duration::from_secs(1), move || {
+        own_timer(app.clone(), Duration::from_millis(250), move || {
             let _ = try_with_app_mut(|_| apply_render_policy(&app));
         });
     }
@@ -132,15 +134,32 @@ pub(crate) fn apply_render_policy(app: &AppHandle) {
             log::info!("mascot window was not topmost; restored");
         }
     }
+    crate::desktop::win32::ensure_topmost(app.borrow().stage.hwnd() as isize);
     let hidden = !app.borrow().ui.window().is_visible() || crate::desktop::win32::session_locked();
     let fps = if hidden {
         0
-    } else if app.borrow().game_compacted {
+    } else if app.borrow().foreground_game.is_some() {
         10
     } else {
         30
     };
     app.borrow().stage.set_fps(fps);
+}
+
+/// Detection runs even during speech, dragging and slow network requests.
+fn tick_activity() {
+    static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    once_at_a_time(&IN_FLIGHT, || {
+        let activity = crate::desktop::presence::refresh();
+        crate::proactive::observe_activity(&activity);
+        post(move |app| {
+            if let Some(studio) = app.borrow().studio.as_ref() {
+                studio.set_activity_status(activity.description().into());
+            }
+            super::valorant::tick(app, &activity);
+            apply_game_state(app, activity.foreground_game);
+        });
+    });
 }
 
 /// Runs `work` on a worker unless the previous run behind `flag` is still going.
@@ -175,24 +194,29 @@ pub(crate) fn tick_proactive(app: &AppHandle) {
         if occupied {
             return;
         }
-        let game = crate::desktop::presence::detect_game();
-        let event = crate::proactive::check_for_event().and_then(|mut event| {
-            let (text, emotion) = crate::ai::tasks::proactive_line(&event.situation, &event.emotion)?;
-            event.message = text;
-            event.emotion = emotion;
-            Some(event)
+        let event = crate::proactive::check_for_event().map(|mut event| {
+            if let Some((text, emotion)) = crate::ai::tasks::proactive_line(&event.situation, &event.emotion) {
+                event.message = text;
+                event.emotion = emotion;
+            }
+            event
         });
         post(move |app| {
-            let event = event.filter(|_| app.borrow().speech_generation == generation
-                && started.elapsed() < Duration::from_secs(25));
-            apply_proactive(app, game, event);
+            let event = event.and_then(|event| {
+                if app.borrow().speech_generation == generation && started.elapsed() < Duration::from_secs(25) {
+                    Some(event)
+                } else {
+                    crate::proactive::defer_event(event);
+                    None
+                }
+            });
+            apply_proactive(app, event);
         });
     });
 }
 
 pub(crate) fn apply_proactive(
     app: &AppHandle,
-    game: Option<crate::desktop::presence::Game>,
     event: Option<crate::proactive::ProactiveEvent>,
 ) {
     if let Some(change) = crate::persona::mood::consume_change() {
@@ -203,12 +227,15 @@ pub(crate) fn apply_proactive(
             config::update(|s| s.tts_voice = target.to_string());
         }
     }
-    apply_game_state(app, game);
-    if app.borrow().busy || app.borrow().dragging || crate::voice::is_recording() {
+    if app.borrow().busy || app.borrow().dragging || app.borrow().reaction_pending
+        || crate::voice::is_recording() || crate::voice::is_speaking()
+        || crate::desktop::presence::latest().locked {
+        if let Some(event) = event { crate::proactive::defer_event(event); }
         return;
     }
     if let Some(event) = event {
-        if let Some(location) = &event.walk_location {
+        if !event.is_current() { return; }
+        if let Some(location) = event.walk_location.as_ref().filter(|_| app.borrow().foreground_game.is_none()) {
             // App and music events hop up onto the active window, when there is one to stand on.
             let perch = location == "perch" || event.category.starts_with("app_") || event.category.contains("music");
             if !perch {
@@ -224,58 +251,73 @@ pub(crate) fn apply_proactive(
 /// Game-dodge state machine, fed by the worker's detection.
 pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::presence::Game>) {
     let settings = config::get();
-    if !settings.smart_gaming_dodge_enabled && !settings.automatic_game_copilot_enabled {
-        return;
+    if app.borrow().foreground_game != game {
+        app.borrow_mut().last_copilot_vision = Instant::now();
     }
+    app.borrow_mut().foreground_game = game.clone();
+    if app.borrow().dragging { return; }
     let compacted = app.borrow().game_compacted;
-    match game {
+    let dodge_game = game.as_ref().filter(|_| settings.smart_gaming_dodge_enabled);
+    match dodge_game {
         Some(game) if !compacted => {
             {
                 let mut a = app.borrow_mut();
                 a.game_compacted = true;
-                a.pre_game_scale = settings.avatar_scale;
                 a.pre_game_pos = Some(a.pos);
-                a.last_copilot_vision = Instant::now();
+                a.target = None;
+                a.perch_target = None;
             }
-            apply_scale(app, 0.52);
-            let (sx, sy, sw, sh) = crate::desktop::win32::work_area();
+            sync_chrome(app);
+            let area = crate::desktop::presence::foreground().and_then(|fg| crate::desktop::win32::window_rect(fg.hwnd))
+                .map(|(x, y, w, h)| crate::desktop::win32::work_area_at(x + w / 2, y + h / 2));
+            let (sx, sy, sw, sh) = area.unwrap_or_else(crate::desktop::win32::work_area);
             let (w, h) = window_size(app);
             set_window_pos(app, sx + sw - (w as f32 * 0.86) as i32, sy + sh - h - 8);
             set_peeking(app, "right");
             log::info!("game detected: {} ({})", game.name, game.signal);
-            say(
-                app,
-                &crate::persona::flav(&format!("Game detected ({}). I'll cheer you on and watch your back from the corner.", game.name)),
-                "talking",
-                vec![format!("game copilot active ({})", game.name)],
-                true,
-            );
-        }
-        Some(game) if settings.automatic_game_copilot_enabled => {
-            let due = app.borrow().last_copilot_vision.elapsed().as_secs() >= 85 && !app.borrow().busy;
-            if due {
-                app.borrow_mut().last_copilot_vision = Instant::now();
-                let prompt = format!(
-                    "You are Aria acting as an Automatic Live Game Co-Pilot for {}. Look at this live screenshot right \
-                     now. In your active character persona, give a punchy 1-sentence tactical observation, clutch \
-                     callout, warning about health, ammo or enemies, or enthusiastic encouragement. Keep it under 25 words.",
-                    game.name
-                );
-                submit_prompt(app, prompt, true);
-            }
         }
         None if compacted => {
             app.borrow_mut().game_compacted = false;
             set_peeking(app, "none");
-            let scale = app.borrow().pre_game_scale;
-            apply_scale(app, scale);
+            sync_chrome(app);
             let pre_game_pos = app.borrow().pre_game_pos;
             if let Some(pos) = pre_game_pos {
                 app.borrow_mut().target = Some(pos);
             }
-            say(app, &crate::persona::flav("Back to your desktop. Restored to full size."), "idle", vec!["desktop restored".into()], false);
         }
         _ => {}
+    }
+    if let Some(game) = game.filter(|_| settings.automatic_game_copilot_enabled) {
+        // Valorant uses structured own-player observations and results-screen recaps.
+        // Its live frames do not go through the generic game-commentary prompt.
+        if game.name == "Valorant" { return; }
+        let a = app.borrow();
+        let due = a.last_copilot_vision.elapsed().as_secs() >= 85 && !a.busy && !a.dragging && !a.reaction_pending
+            && !crate::voice::is_recording() && !crate::voice::is_speaking() && crate::ai::client::available();
+        drop(a);
+        if due {
+            app.borrow_mut().last_copilot_vision = Instant::now();
+            let generation = app.borrow().speech_generation;
+            let started = Instant::now();
+            app.borrow_mut().reaction_pending = true;
+            std::thread::spawn(move || {
+                let reply = crate::ai::tasks::game_observation(&game.name);
+                post(move |app| {
+                    app.borrow_mut().reaction_pending = false;
+                    let a = app.borrow();
+                    let current = a.speech_generation == generation && !a.busy && !a.dragging
+                        && a.foreground_game.as_ref().is_some_and(|active| active.name == game.name)
+                        && config::get().automatic_game_copilot_enabled && started.elapsed() < Duration::from_secs(20)
+                        && !crate::voice::is_recording() && !crate::voice::is_speaking();
+                    drop(a);
+                    if current {
+                        if let Some((text, emotion)) = reply {
+                            say(app, &text, &emotion, vec![format!("Game observation: {}", game.name)], true);
+                        }
+                    }
+                });
+            });
+        }
     }
 }
 
@@ -323,8 +365,14 @@ pub(crate) fn apply_music_state(
 
 fn send_music_levels(app: &AppHandle, beat: Option<crate::desktop::beat::Music>) {
     // Compute phase on the UI thread immediately before sending it to the renderer.
+    //
+    // `bpm` is 0 until the tracker has locked onto a rhythm, and the renderer reads that as
+    // "keep your own tempo" (a sway). Once locked, the tempo is kept for the whole song even
+    // through quiet bars, so she does not drop out of a dance between phrases.
     let (energy, bpm, phase) = match beat {
-        Some(b) if b.confidence >= 0.12 => (b.energy, b.bpm, b.phase_at(Instant::now())),
+        Some(b) if b.confidence >= crate::desktop::beat::MIN_CONFIDENCE && b.bpm > 0.0 => {
+            (b.energy, b.bpm, b.phase_at(Instant::now()))
+        }
         Some(b) => (b.energy, 0.0, 0.0),
         None => (0.0, 0.0, 0.0),
     };
@@ -395,6 +443,9 @@ fn idle_pause(persona: &str) -> Duration {
 
 /// What the user is up to, in a few words, for the idle-event prompt.
 fn describe_activity() -> String {
+    if let Some(game) = crate::desktop::presence::detect_game() {
+        return format!("playing {}", game.name);
+    }
     if crate::desktop::presence::is_away(240.0) {
         return "away from the PC".into();
     }

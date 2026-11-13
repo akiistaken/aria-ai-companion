@@ -104,7 +104,11 @@ pub struct FootPose {
     pub pitch: f32,
     /// World yaw of the foot.
     pub yaw: f32,
+    /// Where this foot is this frame.
     pub planted: bool,
+    /// Where in the whole step cycle this foot is, 0..1 since its own contact. The keyframed
+    /// walk reads this so it stays locked to the feet rather than to a timer.
+    pub cycle: f32,
 }
 
 /// What [`Gait::update`] needs each frame.
@@ -164,6 +168,64 @@ fn foot_track(keys: &[(f32, f32)], t: f32) -> f32 {
 
 const SWING_HEIGHT: &[(f32, f32)] = &[(0.0, 0.0), (0.14, 0.42), (0.42, 1.0), (0.68, 0.72), (0.86, 0.18), (1.0, 0.0)];
 const SWING_PITCH: &[(f32, f32)] = &[(0.0, 0.4), (0.16, 0.48), (0.42, 0.12), (0.68, -0.1), (0.86, -0.23), (1.0, -0.23)];
+
+// ---- The walk cycle, as keyframes --------------------------------------------------------------
+//
+// A walk is authored the way animators build one: contact, down, passing, up, contact on the
+// other foot, with the body's vertical travel, weight shift, pelvis rotation and arm swing all
+// keyed against the same phase. Everything here is driven by `Gait::phase`, which advances with
+// distance travelled, so the keys stay locked to the planted foot at any speed instead of
+// drifting against a timer.
+//
+// `c` runs 0..1 over one full cycle (a step with each foot): 0 is the left foot's contact, 0.5
+// the right foot's. Each foot is on the ground for `DUTY` of it, so the left supports from 0 to
+// 0.62 and the right from 0.5 to 0.12 (wrapping): both are down for a moment either side of
+// 0.5 and 1.0, as in a real walk.
+//
+// The values are fractions of a leg length or plain multipliers, so the cycle fits a chibi and
+// a tall rig alike.
+
+/// Phase of the cycle at which the left foot makes contact.
+const CONTACT_PHASE: f32 = 1.0 - DUTY;
+
+/// Vertical travel of the hips over one cycle: lowest just after each contact (the knee absorbs
+/// the landing) and highest over each passing pose. Two dips and two rises per cycle is what a
+/// walk does; a single dip reads as a limp. 0 is the lowest, 1 the highest.
+pub const HIP_RISE: &[(f32, f32)] = &[
+    (0.0, 0.42),
+    (0.07, 0.0),
+    (0.31, 1.0),
+    (0.5, 0.42),
+    (0.57, 0.0),
+    (0.81, 1.0),
+    (1.0, 0.42),
+];
+
+/// How far the pelvis sits down over the lowest point of the cycle, as a fraction of the leg: the
+/// amount the knee has to bend to absorb each landing.
+pub const HIP_RISE_DEPTH: f32 = 0.055;
+
+/// Side-to-side shift of the pelvis, toward the foot that is carrying her (+ is toward the left
+/// foot). She is over the left foot through its stance and the right foot through its own.
+pub const HIP_SWAY: &[(f32, f32)] = &[(0.0, 0.0), (0.31, 1.0), (0.5, 0.0), (0.81, -1.0), (1.0, 0.0)];
+
+/// Pelvis rotation about the vertical: the hip of the forward leg leads.
+pub const PELVIS_TWIST: &[(f32, f32)] = &[(0.0, 1.0), (0.5, -1.0), (1.0, 1.0)];
+
+/// Pelvis roll: the hip on the swinging side drops (Trendelenburg), which reads as weight.
+pub const PELVIS_ROLL: &[(f32, f32)] = &[(0.0, 0.0), (0.31, -1.0), (0.5, 0.0), (0.81, 1.0), (1.0, 0.0)];
+
+/// Arm swing (radians of shoulder) and elbow bend. An arm goes back as its own leg comes forward.
+pub const ARM_SWING: &[(f32, f32)] = &[(0.0, -0.62), (0.25, -0.1), (0.5, 0.62), (0.75, 0.1), (1.0, -0.62)];
+pub const ARM_BEND: &[(f32, f32)] = &[(0.0, 0.20), (0.25, 0.40), (0.5, 0.62), (0.75, 0.42), (1.0, 0.20)];
+
+/// Trunk lean forward, keyed to the cycle so the lean swells into each push-off.
+pub const TRUNK_LEAN: &[(f32, f32)] = &[(0.0, 0.055), (0.31, 0.075), (0.5, 0.055), (0.81, 0.075), (1.0, 0.055)];
+
+/// Samples a cyclic key list at `c` (0..1, wrapping), smoothly interpolated.
+pub fn cycle(keys: &[(f32, f32)], c: f32) -> f32 {
+    foot_track(keys, c.rem_euclid(1.0))
+}
 
 impl Gait {
     /// Stride length for a speed: about 1.9 leg lengths times the square root of the Froude-style
@@ -279,6 +341,10 @@ impl Gait {
                         pitch: reach * foot_track(SWING_PITCH, u),
                         yaw: foot.yaw,
                         planted: false,
+
+                        // The foot's own progress since it last touched down: its contact is at
+                        // u = 0 of its swing, and stance follows the swing.
+                        cycle: (self.phase - CONTACT_PHASE - i as f32 * 0.5).rem_euclid(1.0),
                     };
                     continue;
                 }
@@ -290,7 +356,14 @@ impl Gait {
             } else {
                 0.0
             };
-            out[i] = FootPose { ground: foot.pos, height: 0.0, pitch: roll, yaw: foot.yaw, planted: true };
+            out[i] = FootPose {
+                ground: foot.pos,
+                height: 0.0,
+                pitch: roll,
+                yaw: foot.yaw,
+                planted: true,
+                cycle: (self.phase - CONTACT_PHASE - i as f32 * 0.5).rem_euclid(1.0),
+            };
         }
         out
     }

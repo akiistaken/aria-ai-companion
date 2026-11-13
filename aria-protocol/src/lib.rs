@@ -6,8 +6,6 @@
 //!
 //! The variants mirror the old WebView JS API so behaviour maps 1:1.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 /// Where a peeking avatar is poking out from.
@@ -62,6 +60,38 @@ pub const EMOTIONS: &[&str] = &[
     "stretch", "look_around", "hum", "twirl", "fix_hair", "clap",
 ];
 
+/// One prop the user has loaded from their own file and attached to a bone.
+///
+/// There are no built-in accessories: the wardrobe is entirely what the user loads.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PropSpec {
+    /// Stable id (the app uses the file path), so the renderer can tell props apart.
+    pub id: String,
+    /// Absolute path of a glTF/GLB to display.
+    pub path: String,
+    /// Humanoid bone it hangs from: `head`, `leftHand`, `upperChest`, …
+    pub bone: String,
+    /// Offset from the bone in model metres.
+    #[serde(default)]
+    pub offset: [f32; 3],
+    /// Rotation in degrees about the model's axes at the bone.
+    #[serde(default)]
+    pub rotation: [f32; 3],
+    /// Uniform scale, 1 = as authored.
+    #[serde(default = "one")]
+    pub scale: f32,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn yes() -> bool {
+    true
+}
+
 /// Commands sent from the app to the avatar renderer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
@@ -92,7 +122,8 @@ pub enum Command {
         beat: f32,
     },
     TriggerHeadpat,
-    SetProps { props: BTreeMap<String, bool> },
+    /// The wardrobe: one entry per prop the user has loaded, replacing the whole list.
+    SetProps { props: Vec<PropSpec> },
     /// `auto` | `day` | `dawn` | `sunset` | `night`.
     SetLighting { preset: String },
     SetCameraFraming {
@@ -260,6 +291,25 @@ mod tests {
         let line = r#"{"kind":"set_music_vibe","data":{"active":true,"energy":0.5}}"#;
         match serde_json::from_str::<Command>(line).expect("parses") {
             Command::SetMusicVibe { active, bpm, beat, .. } => assert!(active && bpm == 0.0 && beat == 0.0),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn props_round_trip_with_defaults_for_optional_fields() {
+        let line = r#"{"kind":"set_props","data":{"props":[
+            {"id":"hat","path":"C:/p/hat.glb","bone":"head"},
+            {"id":"cup","path":"C:/p/cup.glb","bone":"rightHand","offset":[0.1,0,0],"scale":2.0,"enabled":false}
+        ]}}"#;
+        match serde_json::from_str::<Command>(line).expect("parses") {
+            Command::SetProps { props } => {
+                assert_eq!(props.len(), 2);
+                assert_eq!(props[0].scale, 1.0, "a prop without a scale is 1:1");
+                assert!(props[0].enabled, "and visible");
+                assert_eq!(props[0].offset, [0.0, 0.0, 0.0]);
+                assert_eq!(props[1].offset, [0.1, 0.0, 0.0]);
+                assert!(!props[1].enabled);
+            }
             other => panic!("wrong variant: {other:?}"),
         }
     }

@@ -26,6 +26,7 @@ mod props;
 mod rig;
 mod spring;
 
+
 use bevy::prelude::*;
 use bevy_vrm1::prelude::*;
 use std::path::PathBuf;
@@ -108,6 +109,7 @@ fn main() {
     .init_resource::<hearts::Hearts>()
     .init_resource::<input::GestureState>()
     .init_resource::<animator::Animator>()
+    .init_resource::<props::Props>()
     .insert_resource(AvatarLink::new(args))
     .set_runner(run_loop)
     .add_systems(
@@ -123,14 +125,13 @@ fn main() {
             behaviors::spawn_look_target,
             behaviors::manage_model,
             behaviors::resolve_rig,
-            behaviors::build_props,
+            behaviors::forget_props,
             present::apply_viewport,
             present::apply_pause,
             lighting::apply_lighting,
             demo::drive.run_if(resource_exists::<demo::Demo>),
             behaviors::animate,
-            props::sync_visibility,
-            props::animate_props,
+            props::sync_props,
             input::track_pointer,
             present::present_latest,
             present::request_capture,
@@ -164,9 +165,28 @@ fn apply_dev_overrides(state: &mut behaviors::AvatarState) {
         Some("held") => state.body = aria_protocol::BodyMode::Held,
         _ => {}
     }
+    // `ARIA_AVATAR_PROPS=hat.glb@head@0,0.1,0` — a preview of a loaded prop without the app.
     if let Some(props) = var("ARIA_AVATAR_PROPS") {
-        for prop in props.split(',') {
-            state.props.insert(prop.trim().to_string(), true);
+        for entry in props.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+            let mut fields = entry.split('@');
+            let (Some(path), Some(bone)) = (fields.next(), fields.next()) else { continue };
+            let offset = fields
+                .next()
+                .and_then(|v| {
+                    let parts: Option<Vec<f32>> = v.split(',').map(|n| n.trim().parse().ok()).collect();
+                    parts.and_then(|p| (p.len() == 3).then(|| [p[0], p[1], p[2]]))
+                })
+                .unwrap_or([0.0; 3]);
+            let scale = fields.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1.0);
+            state.props.push(crate::props::PropSpec {
+                id: path.to_string(),
+                path: path.to_string(),
+                bone: bone.trim().to_string(),
+                offset: Vec3::from(offset),
+                rotation: Vec3::ZERO,
+                scale,
+                enabled: true,
+            });
         }
     }
     if let Some(framing) = var("ARIA_AVATAR_FRAMING") {

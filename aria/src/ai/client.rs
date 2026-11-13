@@ -299,7 +299,8 @@ pub fn complete(request: &Request) -> Result<Completion, AiError> {
         let body = build(request, settings.ai_model.clone(), &settings.reasoning);
         let started = std::time::Instant::now();
         let result = runtime().block_on(async {
-            match tokio::time::timeout(TIMEOUT, client.chat().create_byot::<_, Completion>(body)).await {
+            let timeout = if request.light { Duration::from_secs(8) } else { TIMEOUT };
+            match tokio::time::timeout(timeout, client.chat().create_byot::<_, Completion>(body)).await {
                 Ok(result) => result.map_err(classify),
                 Err(_) => Err(AiError::Timeout),
             }

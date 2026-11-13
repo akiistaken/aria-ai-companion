@@ -143,6 +143,41 @@ $env:ARIA_AVATAR_LIGHTING='sunset'; $env:ARIA_AVATAR_FRAMING='full'
 `ARIA_MUSIC_TRACE=1` logs the delivered levels and BPM every three seconds, which is the easiest way
 to see whether music detection works on your machine.
 
+**Presence & gaming** shows the current app, game and detection evidence in the Control Center.
+Aria checks native Windows activity every two seconds, including Valorant and Apex executable names,
+Steam/Epic manifests on custom drives, game libraries and game engines. Launchers, browsers and
+editors are excluded. Detection continues while she speaks or waits for AI; brief Alt-Tab changes
+keep the game session open. Controller input counts toward presence, and fullscreen media viewing
+does not trigger AFK mode.
+
+Smart Dodge controls shrinking independently of Game Copilot, and the temporary size is never saved
+over your preferred avatar size. Copilot screenshots use the game’s monitor. Local reactions have
+fallback lines when AI is unavailable. Both avatar and chat windows recover their topmost position
+without taking keyboard focus. Use borderless/windowed game mode for desktop overlays; exclusive
+fullscreen games can bypass Windows desktop composition.
+
+**Valorant awareness** is available under Control Center → **Presence & gaming**. Enable it and
+leave the test Riot ID blank: Aria discovers the signed-in account from the local Riot Client,
+including account changes and logout. Region is read from Valorant's deployment when the game is
+running. The local endpoints are community documented and can change between Riot Client versions.
+The Tracker.gg key is not used.
+
+With Game copilot enabled, Aria reads the visible Valorant window at most once per minute by
+default. Open the scoreboard or results screen to make your statistics readable. **Refresh** queues
+a capture for when you return to the game; it never opens the scoreboard or takes game input.
+Frames go to your configured AI model, are not saved, and require a vision-capable model.
+Only a confidently identified own-player row supplies K/D/A. Missing fields remain unknown, and
+observations are marked stale after two sampling intervals or when the game loses focus.
+
+Readable completed-match results produce a recap. **Import Riot match** accepts a completed
+`VAL-MATCH-V1` match JSON response, selects your player by detected PUUID, and calculates K/D,
+ACS, ADR and hit-based headshot percentage where the underlying fields are complete. This is an
+import adapter; automatic remote match fetching and Riot Sign On are not connected. Use
+`get_valorant_stats` through chat for recorded statistics and reflective analysis.
+Up to 20 own-player records per account are stored in `%APPDATA%\Aria\valorant`.
+Disconnect stops discovery/captures and clears the active account; saved history stays available
+on reconnection. Test overrides and sampling interval are shown in `settings.example.json`.
+
 ## Status and known limits
 
 Phase 0–11 are done; [PROGRESS.md](PROGRESS.md) is the source of truth for what is finished, every

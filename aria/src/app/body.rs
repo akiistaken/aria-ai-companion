@@ -39,7 +39,7 @@ pub(crate) fn setup_window(app: &AppHandle) {
 /// grows **upward**: the window moves up by however much the bubble grew, which keeps the avatar
 /// (and the command bar under it) still on screen.
 pub(crate) fn sync_chrome(app: &AppHandle) {
-    let scale = config::get().avatar_scale;
+    let scale = if app.borrow().game_compacted { 0.52 } else { config::get().avatar_scale };
     let (bubble_slot, chrome, sf, previous) = {
         let a = app.borrow();
         a.ui.set_stage_w(STAGE_BASE_W * scale);

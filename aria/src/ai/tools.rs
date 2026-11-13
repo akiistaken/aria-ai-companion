@@ -47,6 +47,18 @@ struct Tool {
 
 const TOOLS: &[Tool] = &[
     Tool {
+        name: "get_valorant_stats",
+        desc: "Gets the automatically detected signed-in Riot account, visible own-player Valorant stats, their timestamps/staleness, recorded completed matches, calculated metrics and post-match recap. Missing fields are unknown. This reads cached data, never scouts opponents or supplies live tactical advice. Use for the user's Valorant statistics and reflective match analysis; current frames are approximate and may be stale.",
+        params: &[],
+        legacy_desktop: false,
+    },
+    Tool {
+        name: "get_pc_activity",
+        desc: "Gets locally detected foreground app, game detection evidence, running games, user presence, idle time, lock state and media activity. Use this to check what the user is doing; detection alone does not reveal gameplay outcomes.",
+        params: &[],
+        legacy_desktop: false,
+    },
+    Tool {
         name: "get_system_stats",
         desc: "Gets current PC hardware and system status: CPU, RAM, disk, battery and the open windows.",
         params: &[],
@@ -256,7 +268,20 @@ pub fn execute(name: &str, args: &Value, ctx: &ToolCtx) -> Value {
         };
     }
     match name {
+        "get_valorant_stats" => {
+            if !crate::config::get().valorant_enabled {
+                json!({"status":"disabled","message":"Enable Valorant awareness in Presence & gaming."})
+            } else {
+                let data = crate::valorant::snapshot();
+                let metrics = data.recent_matches.iter().map(|record| json!({
+                    "match_id":record.id,"source":record.source,"metrics":record.stats.metrics()
+                })).collect::<Vec<_>>();
+                json!({"status":"success","data":data,"completed_match_metrics":metrics,
+                    "limitations":"Visible frames are partial observations, not live telemetry. Review completed matches; do not give immediate tactical instructions or infer stats from missing fields."})
+            }
+        },
         "get_system_stats" => serde_json::to_value(system::system_stats()).unwrap_or_default(),
+        "get_pc_activity" => serde_json::to_value(crate::desktop::presence::latest()).unwrap_or_default(),
         "get_now_playing_media" => serde_json::to_value(media::now_playing()).unwrap_or_default(),
         "move_mascot" => {
             let location = arg_opt(args, "location").unwrap_or_else(|| "roam".into());

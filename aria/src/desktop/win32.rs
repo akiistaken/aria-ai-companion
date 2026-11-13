@@ -4,6 +4,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -39,19 +40,21 @@ pub struct WindowInfo {
     pub visible: bool,
 }
 
-static PROC_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+static PROC_CACHE: OnceLock<Mutex<HashMap<u32, (Instant, String)>>> = OnceLock::new();
 
-fn proc_cache() -> &'static Mutex<HashMap<u32, String>> {
+fn proc_cache() -> &'static Mutex<HashMap<u32, (Instant, String)>> {
     PROC_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Lower-cased full image path for a pid, or "" when inaccessible. Cached per pid.
+/// Lower-cased image path. Expiry handles exited/reused PIDs and transient access failures.
 pub fn process_path(pid: u32) -> String {
     if pid == 0 {
         return String::new();
     }
-    if let Some(path) = proc_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&pid) {
-        return path.clone();
+    if let Some((at, path)) = proc_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&pid) {
+        if at.elapsed() < Duration::from_secs(2) {
+            return path.clone();
+        }
     }
     // SAFETY: the handle is checked, used for one query and closed.
     let path = unsafe {
@@ -71,13 +74,44 @@ pub fn process_path(pid: u32) -> String {
     if cache.len() > 512 {
         cache.clear();
     }
-    cache.insert(pid, path.clone());
+    cache.insert(pid, (Instant::now(), path.clone()));
     path
 }
 
 /// Lower-cased executable name for a pid, or "" when inaccessible.
 pub fn process_name(pid: u32) -> String {
-    process_path(pid).rsplit(['\\', '/']).next().unwrap_or_default().to_string()
+    let path = process_path(pid);
+    if !path.is_empty() { return path.rsplit(['\\', '/']).next().unwrap_or_default().to_string(); }
+    // Anti-cheat/protected processes can deny image-path queries. The process snapshot still
+    // exposes their executable names without opening the game or reading its memory.
+    process_snapshot_names().get(&pid).cloned().unwrap_or_default()
+}
+
+fn process_snapshot_names() -> HashMap<u32, String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    static CACHE: Mutex<Option<(Instant, HashMap<u32, String>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, names)) = cache.as_ref() {
+        if at.elapsed() < Duration::from_secs(2) { return names.clone(); }
+    }
+    let mut names = HashMap::new();
+    unsafe {
+        if let Ok(handle) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+            if Process32FirstW(handle, &mut entry).is_ok() {
+                loop {
+                    let len = entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len());
+                    names.insert(entry.th32ProcessID, String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase());
+                    if Process32NextW(handle, &mut entry).is_err() { break; }
+                }
+            }
+            let _ = CloseHandle(handle);
+        }
+    }
+    *cache = Some((Instant::now(), names.clone()));
+    names
 }
 
 pub fn enum_windows(include_hidden: bool) -> Vec<WindowInfo> {
@@ -189,7 +223,11 @@ pub fn active_window() -> Option<WindowInfo> {
         hwnd: hwnd.0 as isize,
         pid,
         title,
-        class: String::new(),
+        class: {
+            let mut buf = [0u16; 256];
+            let len = unsafe { GetClassNameW(hwnd, &mut buf) }.max(0) as usize;
+            String::from_utf16_lossy(&buf[..len])
+        },
         exe: process_name(pid),
         visible: true,
     })
@@ -426,11 +464,19 @@ pub struct Capture {
     pub height: u32,
 }
 
-/// Captures the primary monitor as RGB pixels, downscaled to `max_width`.
+/// Captures the foreground game's monitor (primary otherwise), downscaled to `max_width`.
 pub fn capture_screen(max_width: u32) -> Option<Capture> {
+    let area = crate::desktop::presence::foreground()
+        .filter(|_| crate::desktop::presence::detect_game().is_some())
+        .and_then(|fg| window_rect(fg.hwnd))
+        .map(|(x, y, w, h)| monitor_rect_at(x + w / 2, y + h / 2))
+        .unwrap_or_else(screen_size);
+    capture_rect(area, max_width)
+}
+
+fn capture_rect((mx, my, mw, mh): Rect, max_width: u32) -> Option<Capture> {
     unsafe {
-        let (_, _, mw, mh) = screen_size();
-        if mw <= 0 || mh <= 0 {
+        if mw <= 0 || mh <= 0 || max_width == 0 || i64::from(mw) * i64::from(mh) > 100_000_000 {
             return None;
         }
         let screen_dc = GetDC(None);
@@ -446,7 +492,7 @@ pub fn capture_screen(max_width: u32) -> Option<Capture> {
         }
         let old = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
 
-        let blit_ok = BitBlt(mem_dc, 0, 0, mw, mh, Some(screen_dc), 0, 0, SRCCOPY).is_ok();
+        let blit_ok = BitBlt(mem_dc, 0, 0, mw, mh, Some(screen_dc), mx, my, SRCCOPY).is_ok();
 
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -520,6 +566,31 @@ pub fn capture_screen(max_width: u32) -> Option<Capture> {
 
 pub fn capture_screen_jpeg_b64(max_width: u32) -> Option<String> {
     let cap = capture_screen(max_width)?;
+    capture_jpeg_b64(cap)
+}
+
+/// Fresh native check, independent of the two-second presence cache.
+pub fn valorant_foreground() -> Option<isize> {
+    if session_locked() { return None }
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() { return None }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let exe = process_name(pid);
+        ["valorant.exe", "valorant-win64-shipping.exe"].contains(&exe.as_str()).then_some(hwnd.0 as isize)
+    }
+}
+
+/// Capture only the visible game window, with focus checks before and after the copy.
+pub fn capture_valorant_jpeg_b64(hwnd: isize, max_width: u32) -> Option<String> {
+    if valorant_foreground() != Some(hwnd) { return None }
+    let cap = capture_rect(window_rect(hwnd)?, max_width)?;
+    if valorant_foreground() != Some(hwnd) { return None }
+    capture_jpeg_b64(cap)
+}
+
+fn capture_jpeg_b64(cap: Capture) -> Option<String> {
     let img = image::RgbImage::from_raw(cap.width, cap.height, cap.rgb)?;
     let mut buf = std::io::Cursor::new(Vec::new());
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
@@ -535,15 +606,60 @@ pub fn trim_working_set() -> bool {
     }
 }
 
-/// True while the workstation is locked (the lock screen owns the foreground).
-///
-/// Cheap enough for a once-a-second policy check: no session notifications to register for.
+/// True on the lock/UAC secure desktop. A missing foreground during Alt-Tab isn't a lock.
 pub fn session_locked() -> bool {
-    let Some(win) = active_window() else {
-        // No foreground window at all: the secure desktop is up.
-        return true;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, DESKTOP_CONTROL_FLAGS,
+        DESKTOP_READOBJECTS, UOI_NAME,
     };
-    win.exe.eq_ignore_ascii_case("LockApp.exe")
+    unsafe {
+        match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) {
+            Ok(desktop) => {
+                let mut name = [0u16; 256];
+                let ok = GetUserObjectInformationW(HANDLE(desktop.0), UOI_NAME,
+                    Some(name.as_mut_ptr().cast()), std::mem::size_of_val(&name) as u32, None).is_ok();
+                let _ = CloseDesktop(desktop);
+                if ok {
+                    let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+                    return !String::from_utf16_lossy(&name[..len]).eq_ignore_ascii_case("Default");
+                }
+            }
+            // The secure desktop commonly denies access to ordinary processes.
+            Err(e) if e.code() == windows::core::HRESULT::from_win32(5) => return true,
+            Err(_) => {}
+        }
+    }
+    active_window().is_some_and(|w| w.exe.eq_ignore_ascii_case("lockapp.exe"))
+}
+
+pub fn window_minimized(hwnd: isize) -> bool {
+    unsafe { IsIconic(HWND(hwnd as *mut _)).as_bool() }
+}
+
+/// Loaded module names, when readable without elevation (anti-cheat may deny this).
+pub fn process_modules(pid: u32) -> Vec<String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::ProcessStatus::{EnumProcessModulesEx, GetModuleBaseNameW, LIST_MODULES_ALL};
+    use windows::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) else { return Vec::new() };
+        let mut modules = [HMODULE::default(); 1024];
+        let mut bytes = 0;
+        let ok = EnumProcessModulesEx(handle, modules.as_mut_ptr(), std::mem::size_of_val(&modules) as u32,
+            &mut bytes, LIST_MODULES_ALL).is_ok();
+        let mut names = Vec::new();
+        if ok {
+            let count = (bytes as usize / std::mem::size_of::<HMODULE>()).min(modules.len());
+            for module in &modules[..count] {
+                let mut name = [0u16; 256];
+                let len = GetModuleBaseNameW(handle, Some(*module), &mut name) as usize;
+                if len > 0 { names.push(String::from_utf16_lossy(&name[..len]).to_lowercase()); }
+            }
+        }
+        let _ = CloseHandle(handle);
+        names
+    }
 }
 
 /// Restricts painting and input to visible chrome rectangles. An empty list is click-through.
@@ -605,11 +721,10 @@ pub fn move_windows_together(moves: &[(isize, i32, i32)]) -> bool {
 
 /// Makes sure a window sits in the topmost z-order band, without activating it.
 ///
-/// Returns true when it had to fix it. Cheap enough for a once-a-second check: the common case is
-/// a single `GetWindowLongW`.
+/// Returns true after a successful correction. Checks actual z-order as well as the style flag.
 pub fn ensure_topmost(hwnd: isize) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+        GetWindow, GetWindowLongW, SetWindowPos, GW_HWNDPREV, GWL_EXSTYLE, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
         SWP_NOSIZE, WS_EX_TOPMOST,
     };
     if hwnd == 0 {
@@ -617,10 +732,27 @@ pub fn ensure_topmost(hwnd: isize) -> bool {
     }
     unsafe {
         let handle = HWND(hwnd as *mut _);
-        if GetWindowLongW(handle, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as i32 != 0 {
+        if !IsWindowVisible(handle).as_bool() { return false; }
+        let mut above = GetWindow(handle, GW_HWNDPREV).unwrap_or_default();
+        let mut covered = false;
+        // Window order can change concurrently; bound the walk to keep the UI responsive.
+        for _ in 0..256 {
+            if above.0.is_null() { break; }
+            let mut pid = 0;
+            GetWindowThreadProcessId(above, Some(&mut pid));
+            if pid != std::process::id() && IsWindowVisible(above).as_bool() && !IsIconic(above).as_bool() {
+                // The avatar is a separate process but belongs to the same window group.
+                let owner = GetWindow(above, windows::Win32::UI::WindowsAndMessaging::GW_OWNER).unwrap_or_default();
+                let mut owner_pid = 0;
+                if !owner.0.is_null() { GetWindowThreadProcessId(owner, Some(&mut owner_pid)); }
+                if owner_pid != std::process::id() { covered = true; break; }
+            }
+            above = GetWindow(above, GW_HWNDPREV).unwrap_or_default();
+        }
+        if !covered && GetWindowLongW(handle, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as i32 != 0 {
             return false;
         }
-        let _ = SetWindowPos(
+        return SetWindowPos(
             handle,
             Some(HWND_TOPMOST),
             0,
@@ -628,9 +760,8 @@ pub fn ensure_topmost(hwnd: isize) -> bool {
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        ).is_ok();
     }
-    true
 }
 
 /// Takes a top-level window off the taskbar (and Alt+Tab) by making it a tool window.
@@ -764,5 +895,62 @@ mod tests {
     fn work_area_is_sane() {
         let (_, _, w, h) = work_area();
         assert!(w > 0 && h > 0);
+    }
+
+    #[test]
+    #[ignore = "creates temporary offscreen windows on an interactive Windows desktop"]
+    fn live_topmost_recovers_actual_window_order_without_taking_focus() {
+        use std::io::{BufRead, BufReader};
+        use std::os::windows::process::CommandExt;
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        };
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) { unsafe { let _ = DestroyWindow(self.0); } }
+        }
+        struct Helper(std::process::Child);
+        impl Drop for Helper {
+            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+        }
+        let focus = unsafe { GetForegroundWindow() };
+        let window = TestWindow(unsafe { CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            w!("STATIC"), w!("Aria topmost test"), WS_POPUP | WS_VISIBLE,
+            -32000, -32000, 1, 1, None, None, None, None) }.unwrap());
+        let script = r#"
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AriaWindowFixture {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateWindowEx(int exStyle, string cls, string title, int style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr hwnd);
+}
+'@
+$testWindow = [AriaWindowFixture]::CreateWindowEx(0x08000008, "STATIC", "Aria foreign topmost fixture", -1879048192, -32000, -32000, 1, 1, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero)
+[Console]::WriteLine($testWindow.ToInt64())
+[Console]::Out.Flush()
+[Console]::ReadLine() | Out-Null
+[AriaWindowFixture]::DestroyWindow($testWindow) | Out-Null
+"#;
+        let mut helper = Helper(std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .creation_flags(0x08000000)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+            .spawn().unwrap());
+        let mut line = String::new();
+        BufReader::new(helper.0.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let foreign = line.trim().parse::<isize>().unwrap();
+        assert_ne!(foreign, 0);
+        assert!(unsafe { GetWindowLongW(window.0, GWL_EXSTYLE) } & WS_EX_TOPMOST.0 as i32 != 0);
+        assert!(ensure_topmost(window.0.0 as isize), "restore z-order even with topmost flag already set");
+        // Invisible system windows can remain above ordinary topmost windows.
+        let windows = enum_windows(false);
+        let ours = windows.iter().position(|w| w.hwnd == window.0.0 as isize).unwrap();
+        let theirs = windows.iter().position(|w| w.hwnd == foreign).unwrap();
+        assert!(ours < theirs, "the test window must now be above the foreign topmost window");
+        assert_eq!(unsafe { GetForegroundWindow() }, focus, "recovery must not take keyboard focus");
     }
 }

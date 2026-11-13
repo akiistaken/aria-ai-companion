@@ -33,6 +33,7 @@ export struct TraitRow {
 export struct PropCell {
     key: string,
     label: string,
+    bone: string,
     active: bool,
 }
 
@@ -631,8 +632,17 @@ export component ControlCenter inherits Window {
     in property <bool> music-vibe: true;
     in property <bool> proactive: true;
     in property <bool> presence: true;
+    in property <string> activity-status: "Checking PC activity…";
     in property <bool> clipboard: true;
     in property <bool> gaming-copilot: true;
+    in property <bool> valorant-on: false;
+    in property <string> valorant-account: "";
+    in property <string> valorant-status: "";
+    in property <string> valorant-current: "";
+    in property <string> valorant-history: "";
+    in property <string> valorant-recap: "";
+    in property <string> valorant-test-id: "";
+    in property <string> valorant-test-region: "ap";
     in property <bool> game-dodge: true;
     in property <bool> edge-snap: true;
     in property <bool> discord: false;
@@ -665,6 +675,11 @@ export component ControlCenter inherits Window {
     callback toggle-presence(bool);
     callback toggle-clipboard(bool);
     callback toggle-gaming(bool);
+    callback toggle-valorant(bool);
+    callback save-valorant-test(string, string);
+    callback refresh-valorant();
+    callback import-valorant();
+    callback disconnect-valorant();
     callback toggle-dodge(bool);
     callback toggle-edge-snap(bool);
     callback toggle-discord(bool);
@@ -683,7 +698,11 @@ export component ControlCenter inherits Window {
     callback set-avatar-scale(float);
     callback reset-camera();
     callback load-vrm();
+    callback add-prop();
     callback toggle-prop(string);
+    callback remove-prop(string);
+    callback pick-prop-bone(string);
+    callback set-prop-scale(string, float);
     callback headpat();
     callback tease();
     callback hype();
@@ -855,65 +874,109 @@ export component ControlCenter inherits Window {
                             spacing: 28px;
 
                             Section {
-                                title: "Wardrobe";
-                                note: "Accessories attach to the live avatar and persist across restarts.";
+                                title: "Props";
+                                note: "Aria has no built-in accessories. Load a glTF/GLB and attach it to a bone.";
                                 Card {
-                                    gap: 8px;
-                                    for row[k] in Math.ceil(root.props.length / 3) : HorizontalLayout {
-                                        spacing: 8px;
-                                        for cell[m] in 3 : cell-r := Rectangle {
-                                            property <int> idx: k * 3 + m;
-                                            property <bool> real: self.idx < root.props.length;
-                                            property <bool> on: self.real && root.props[self.idx].active;
-                                            horizontal-stretch: 1;
-                                            height: 36px;
-                                            border-radius: Theme.r-sm;
-                                            opacity: self.real ? 1 : 0;
-                                            background: self.on ? Accent.wash : (prop-hit.has-hover ? Theme.surface-raised : Theme.surface-sunken);
-                                            border-width: 1px;
-                                            border-color: self.on ? Accent.edge : (prop-hit.has-hover ? Theme.hairline-strong : Theme.hairline);
+                                    gap: 10px;
 
-                                            Rectangle {
-                                                x: 11px;
-                                                y: (parent.height - 14px) / 2;
-                                                width: 14px;
-                                                height: 14px;
-                                                border-radius: 4px;
-                                                border-width: 1px;
-                                                background: parent.on ? Theme.accent : transparent;
-                                                border-color: parent.on ? Theme.accent : Theme.hairline-strong.brighter(0.3);
-                                                Icon {
-                                                    x: 1px;
-                                                    y: 1px;
-                                                    d: Glyph.check;
-                                                    size: 12px;
-                                                    weight: 2.4px;
-                                                    tint: Theme.canvas;
-                                                    visible: cell-r.on;
-                                                }
-                                            }
-                                            Text {
-                                                x: 33px;
-                                                width: parent.width - 42px;
-                                                height: parent.height;
-                                                text: parent.real ? root.props[parent.idx].label : "";
-                                                color: parent.on ? Theme.text : Theme.text-secondary;
-                                                font-size: 12px;
-                                                font-family: Theme.font-ui;
-                                                vertical-alignment: center;
-                                                overflow: elide;
-                                            }
-                                            prop-hit := TouchArea {
-                                                enabled: parent.real;
-                                                mouse-cursor: pointer;
-                                                clicked => { root.toggle-prop(root.props[parent.idx].key); }
+                                    for prop[idx] in root.props : prop-row := Rectangle {
+                                        property <bool> on: prop.active;
+                                        height: 64px;
+                                        border-radius: Theme.r-sm;
+                                        background: self.on ? Accent.wash : Theme.surface-sunken;
+                                        border-width: 1px;
+                                        border-color: self.on ? Accent.edge : Theme.hairline;
+
+                                        // On/off, whole left half.
+                                        prop-toggle := TouchArea {
+                                            x: 0;
+                                            y: 0;
+                                            width: parent.width - 92px;
+                                            height: parent.height;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.toggle-prop(prop.key); }
+                                        }
+                                        Rectangle {
+                                            x: 11px;
+                                            y: 22px;
+                                            width: 14px;
+                                            height: 14px;
+                                            border-radius: 4px;
+                                            border-width: 1px;
+                                            background: prop-row.on ? Theme.accent : transparent;
+                                            border-color: prop-row.on ? Theme.accent : Theme.hairline-strong.brighter(0.3);
+                                            Icon {
+                                                x: 1px;
+                                                y: 1px;
+                                                d: Glyph.check;
+                                                size: 12px;
+                                                weight: 2.4px;
+                                                tint: Theme.canvas;
+                                                visible: prop-row.on;
                                             }
                                         }
+                                        Text {
+                                            x: 33px;
+                                            y: 8px;
+                                            width: parent.width - 130px;
+                                            height: 20px;
+                                            text: prop.label;
+                                            color: prop-row.on ? Theme.text : Theme.text-secondary;
+                                            font-size: 12.5px;
+                                            font-weight: 600;
+                                            font-family: Theme.font-ui;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            x: 33px;
+                                            y: 28px;
+                                            width: parent.width - 130px;
+                                            height: 26px;
+                                            text: prop.bone;
+                                            color: Theme.text-muted;
+                                            font-size: 11.5px;
+                                            font-family: Theme.font-ui;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        ActionButton {
+                                            x: parent.width - 86px;
+                                            y: 16px;
+                                            label: "Bone";
+                                            clicked => { root.pick-prop-bone(prop.key); }
+                                        }
+                                        ActionButton {
+                                            x: parent.width - 46px;
+                                            y: 16px;
+                                            label: "✕";
+                                            danger: true;
+                                            clicked => { root.remove-prop(prop.key); }
+                                        }
                                     }
+
                                     if root.props.length == 0 : Text {
-                                        text: "No accessories found for this model.";
+                                        text: "No props loaded yet.";
                                         color: Theme.text-muted;
                                         font-size: 12px;
+                                        font-family: Theme.font-ui;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ActionButton {
+                                            label: "Load a prop (.glb / .gltf / .vrm)";
+                                            icon: Glyph.spark;
+                                            primary: true;
+                                            clicked => { root.add-prop(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Offsets are model metres from the bone: tweak Y to lift a hat, Z to push it forward. Attached props follow the bone as she moves.";
+                                        color: Theme.text-muted;
+                                        font-size: 11.5px;
+                                        font-family: Theme.font-ui;
+                                        wrap: word-wrap;
                                     }
                                 }
                             }
@@ -1226,6 +1289,17 @@ export component ControlCenter inherits Window {
                             spacing: 28px;
 
                             Section {
+                                title: "Current PC activity";
+                                Card {
+                                    Text {
+                                        text: root.activity-status;
+                                        color: Theme.text;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            Section {
                                 title: "Proactive company";
                                 Card {
                                     pad-x: 4px;
@@ -1284,7 +1358,7 @@ export component ControlCenter inherits Window {
                                     gap: 0px;
                                     ToggleRow {
                                         label: "Game copilot";
-                                        hint: "Live screen tips and callouts while you play";
+                                        hint: "Game observations and encouragement; Valorant recaps after matches";
                                         checked: root.gaming-copilot;
                                         toggled(v) => { root.toggle-gaming(v); }
                                     }
@@ -1301,6 +1375,88 @@ export component ControlCenter inherits Window {
                                         hint: "Snaps to a bezel and leans in when you drag her close";
                                         checked: root.edge-snap;
                                         toggled(v) => { root.toggle-edge-snap(v); }
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Valorant";
+                                note: "Detects your signed-in Riot account. Visible game frames are sent to your chosen AI model; unreadable stats remain unknown.";
+                                Card {
+                                    ToggleRow {
+                                        label: "Valorant awareness";
+                                        hint: "Read your visible scoreboard and prepare post-match recaps";
+                                        checked: root.valorant-on;
+                                        toggled(v) => { root.toggle-valorant(v); }
+                                    }
+                                    Text {
+                                        text: root.valorant-account;
+                                        color: Theme.text;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: root.valorant-current;
+                                        color: Theme.text-secondary;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: root.valorant-status;
+                                        color: Theme.text-muted;
+                                        wrap: word-wrap;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        ActionButton {
+                                            label: "Refresh";
+                                            clicked => { root.refresh-valorant(); }
+                                        }
+                                        ActionButton {
+                                            label: "Import Riot match";
+                                            clicked => { root.import-valorant(); }
+                                        }
+                                        ActionButton {
+                                            label: "Disconnect";
+                                            clicked => { root.disconnect-valorant(); }
+                                        }
+                                    }
+                                    Text {
+                                        text: root.valorant-history;
+                                        color: Theme.text-secondary;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: root.valorant-recap;
+                                        color: Theme.text;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+
+                            Section {
+                                title: "Valorant test account";
+                                note: "Optional override for testing. Leave Riot ID blank to detect the account automatically. Regions: ap, na, eu, kr, br, latam.";
+                                Card {
+                                    FormRow {
+                                        label: "Riot ID";
+                                        valorant-id := TextField {
+                                            text: root.valorant-test-id;
+                                            placeholder: "Automatic detection";
+                                        }
+                                    }
+                                    FormRow {
+                                        label: "Region";
+                                        valorant-region := TextField {
+                                            text: root.valorant-test-region;
+                                            placeholder: "ap";
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        alignment: start;
+                                        ActionButton {
+                                            label: "Save account setup";
+                                            clicked => { root.save-valorant-test(valorant-id.text, valorant-region.text); }
+                                        }
                                     }
                                 }
                             }

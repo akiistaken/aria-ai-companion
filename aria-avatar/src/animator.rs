@@ -20,7 +20,10 @@ use aria_protocol::{BodyMode, PeekSide};
 use crate::emotes::{self, Act, Ctx, Emote, FootAdjust, Style};
 use crate::face::{FaceRig, Speech, CHANNELS};
 use crate::ik;
-use crate::locomotion::{air_pose, held_pose, AirInput, FootPose, Gait, GaitInput, HeldInput, Motion};
+use crate::locomotion::{
+    air_pose, cycle, held_pose, AirInput, FootPose, Gait, GaitInput, HeldInput, Motion, ARM_BEND,
+    ARM_SWING, HIP_RISE, HIP_RISE_DEPTH, HIP_SWAY, PELVIS_ROLL, PELVIS_TWIST, TRUNK_LEAN,
+};
 use crate::pose::{Arm, HandShape, Pose};
 use crate::rig::{Bone, Rig, Side};
 use crate::spring::{approach, approach_factor, ease_out_back, smoothstep, smootherstep, Spring};
@@ -461,37 +464,51 @@ impl Animator {
         });
         let local = [0, 1].map(|i| to_local(yaw, feet[i].ground));
         let (left, right) = (Side::Left.index(), Side::Right.index());
+        // The walk keyframes add their own bob and weight shift; the defaults below are for
+        // standing, which has none.
+        let (mut walk_bob, mut walk_sway) = (0.0f32, 0.0f32);
 
         if walk > 0.001 {
-            // Pelvis follows the feet, shoulders counter it, arms swing against the legs.
-            let across = local[left] - local[right];
-            let twist = (-0.45 * across.y.atan2(across.x.max(0.05))).clamp(-0.3, 0.3) * walk;
-            let roll = ((feet[left].height - feet[right].height) / leg * 0.9).clamp(-0.12, 0.12) * walk;
-            // 0 with both feet down, 1 at the top of a step: drives the little bounces of a walk.
-            let lift = ((feet[left].height.max(feet[right].height)) / (0.1 * leg)).min(1.0);
+            // One step's worth of the cycle, 0 at this foot's contact. Everything below is keyed
+            // against it, so the trunk, the arms and the legs all travel together.
+            let c = feet[left].cycle;
+            // The key is a 0..1 shape; HIP_RISE_DEPTH sets how far the hips actually travel. At
+            // 0.42 the shape is mid-height, which is where her standing pose already sits, so the
+            // offset is measured from there.
+            let bob = cycle(HIP_RISE, c) - 0.42;
+            let sway = cycle(HIP_SWAY, c);
+            let twist = cycle(PELVIS_TWIST, c) * 0.16;
+            let roll = cycle(PELVIS_ROLL, c) * 0.055;
+            // The pelvis leads, the shoulders counter it, the head stays level over the feet.
             pose.pelvis(0.0, twist, roll);
-            pose.spine(0.05 * walk + 0.16 * run, -twist * 1.6, -roll * 0.9);
-            // The head stays level and steady against the trunk, with a small nod each step.
-            pose.head(0.035 * walk * (lift - 0.5), twist * 0.9, roll * 0.6);
-            let lead = ((local[right].y - local[left].y) / leg * 1.0).clamp(-0.6, 0.6);
+            pose.spine(
+                cycle(TRUNK_LEAN, c) + 0.14 * run,
+                -twist * 1.5,
+                -roll * 0.8 + sway * 0.012,
+            );
+            pose.head(0.0, twist * 0.7, roll * 0.5);
+            walk_bob = bob * HIP_RISE_DEPTH * leg * input.style.bounce.clamp(0.7, 1.6);
+            walk_sway = sway * 0.014 * u;
             let mut arms = Pose::default();
             for side in Side::BOTH {
-                let swing = lead * side.sign();
-                // Shoulders ride up a touch with each step.
-                arms.shrug(side, 0.03 * lift * walk, 0.02 * swing);
+                // An arm goes back as its own leg comes forward, so the two swing opposite.
+                let p = if side == Side::Left { c } else { c + 0.5 };
+                let swing = cycle(ARM_SWING, p);
+                let bend = cycle(ARM_BEND, p);
+                arms.shrug(side, 0.012 * swing.abs(), 0.02 * swing);
                 arms.arm(
                     side,
                     Arm {
-                        down: 1.3 - 0.1 * run - 0.06 * swing.abs(),
+                        down: 1.29 - 0.05 * run,
                         swing,
                         yaw: 0.0,
                         twist: 0.3,
-                        bend: 0.28 + 0.32 * swing.max(0.0) + 0.12 * lift + 0.85 * run,
+                        bend: bend + 0.75 * run,
                         pronate: 0.0,
                     },
                 );
-                // Loose wrists trail the swing.
-                arms.wrist(side, 0.1 - 0.22 * swing, 0.0, 0.0);
+                // Loose wrists trail the swing by a quarter step.
+                arms.wrist(side, 0.1 - 0.24 * cycle(ARM_SWING, p - 0.12), 0.0, 0.0);
                 arms.fingers(side, HandShape::RELAXED.mix(HandShape::LOOSE_FIST, run));
                 let bones = emotes::arm_bones(side).chain([Bone::LeftShoulder.on(side)]);
                 pose.blend_bones(&arms, bones, walk * act.walk_arms);
@@ -564,15 +581,20 @@ impl Animator {
         };
         // Weight rides between the feet and over whichever one is carrying her.
         let idle_sway = (t * 0.45).sin() * 0.012 * u * input.style.sway * (1.0 - walk);
-        let shift = middle * 0.5 + (support - middle) * 0.3 + Vec2::new(idle_sway, 0.0);
+        let shift = middle * 0.5 + (support - middle) * 0.3 + Vec2::new(idle_sway + walk_sway, 0.0);
         self.shift = self.shift.lerp(shift, crate::spring::approach_factor(10.0, dt));
-        // Legs spread apart lower the hips, like the top of a pendulum: that is the walk's bob.
+        // Legs spread apart lower the hips, like the top of a pendulum.
         let spread = (feet[left].ground.distance(feet[right].ground) * 0.5).min(leg * 0.9);
         let bob = (leg - (leg * leg - spread * spread).sqrt()) * input.style.bounce.clamp(0.7, 1.6);
         let dip = (-self.crouch.value).clamp(-0.02 * leg, 0.38 * leg);
-        // Walking on soft knees: a straight-legged walk is what looks stiff. Running sinks more.
-        let soft_knees = (0.028 * walk + 0.035 * run) * leg;
-        let lowered = 0.012 * leg + bob + act.crouch + dip + soft_knees;
+        // The walk's own vertical travel is keyed (`link`), so no flat "soft knees" term is added
+        // on top of it: two bob sources fighting each other read as a limp, not as weight.
+        //
+        // The bob alone is what bends the knee: the foot is planted, so the leg has to shorten as
+        // the hips come down and lengthen as they rise. An extra "loading sink" term was tried
+        // here and measured to add nothing, so it is not carried.
+        let walk_lift = walk_bob * walk;
+        let lowered = 0.012 * leg + bob + act.crouch + dip - walk_lift;
 
         // ---- Feet -------------------------------------------------------------------------
         let layout = (sit > 0.001).then(|| emotes::sit_layout(rig));
@@ -1000,6 +1022,46 @@ mod tests {
         // Walking gets her back on her feet.
         let frame = run(&mut animator, &rig, &input(Emote::Sit, BodyMode::Ground), 90, Vec2::new(160.0, 0.0), &mut clock, &mut px);
         assert!(frame.pose.hips.y > -0.2, "she stands up to walk: {}", frame.pose.hips.y);
+    }
+
+    #[test]
+    fn walking_swings_the_arms_and_bends_the_knees() {
+        // The bug this guards. The walk used to derive the arm swing from `lead`, the feet's
+        // difference along the view axis: for a walk across the screen both feet are at the same
+        // depth, so `lead` was always ~0 and the arms hung motionless at her sides. Combined with
+        // an upper body driven by nothing but that value, the walk read as a stiff glide however
+        // well the feet were placed.
+        let rig = Rig::synthetic(&[]);
+        let mut animator = Animator::default();
+        let (mut clock, mut px) = (0.0, Vec2::ZERO);
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        let mut deepest_knee = 0.0f32;
+        for _ in 0..150 {
+            px += Vec2::new(357.0 * DT, 0.0);
+            animator.motion.update(Some(px.round().as_ivec2()), (260, 370), 376.0, DT);
+            clock += DT;
+            let frame = animator.step(&rig, &input(Emote::Idle, BodyMode::Ground), clock, DT);
+            let fk = rig.fk(&frame.pose);
+            let wrist = fk.pos[Bone::RightHand.index()];
+            let shoulder = fk.pos[Bone::RightUpperArm.index()];
+            lo = lo.min(wrist.z - shoulder.z);
+            hi = hi.max(wrist.z - shoulder.z);
+            for side in Side::BOTH {
+                let thigh = fk.pos[Bone::LeftUpperLeg.on(side).index()];
+                let knee = fk.pos[Bone::LeftLowerLeg.on(side).index()];
+                let ankle = fk.pos[Bone::LeftFoot.on(side).index()];
+                deepest_knee = deepest_knee.max((knee - thigh).angle_between(ankle - knee).to_degrees());
+            }
+        }
+        // A walking arm travels a clear arc, front to back: the hand moves well over 15 cm
+        // relative to its shoulder.
+        assert!(
+            hi - lo > 0.15,
+            "the arms swing only {:.3} m across the cycle: they are hanging still",
+            hi - lo
+        );
+        // And the knee flexes through the stance instead of staying locked.
+        assert!(deepest_knee > 25.0, "the knee never bent past {deepest_knee} degrees");
     }
 
     #[test]

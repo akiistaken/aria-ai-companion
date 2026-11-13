@@ -11,6 +11,68 @@ called out below.
 
 ## Status
 
+### Music, walking and the wardrobe — 2026-11-12 (second pass)
+
+Follow-up to the report that vibing/dancing was still broken, the walk was stiff, and the props
+were unwanted.
+
+**Music.** Three separate acquisition bugs made her behaviour random between launches, which is
+why the same song could get a dance one session and a slow sway the next:
+
+1. The beat tracker reset its whole onset history on **any** quiet sample
+   (`if tracker.energy < 0.025 { rhythm = RhythmLock::default() }`). A breakdown, a quiet bar or
+   a spoken intro threw away the locked tempo, and re-acquiring it takes seconds. Silence now
+   ends a rhythm only after `HOLD` (8 s) of nothing.
+2. `listen()` treated an **empty track label** as a new song and cleared the estimate. Media
+   metadata is queried with a 750 ms/1.5 s timeout and does come back blank while the music plays
+   on, so the tempo was wiped mid-song at random. A blank label now means "same song, metadata
+   unavailable"; the reset is an explicit `RESET` flag instead of a tuple comparison.
+3. Before the first lock the worker published a **made-up 78 BPM**. That is under the 94 BPM
+   groove threshold, so a fast song she had not locked onto yet got a sway, not a dance. It now
+   publishes `bpm = 0` ("keep your own tempo") until a real measurement lands.
+
+Loudness was also judged on absolute dBFS, which made quietly mastered tracks sit under the dance
+threshold permanently (`DANCE_ENERGY = 0.5`). The level is now `absolute.sqrt() * (0.35 + 0.65 ×
+loudness relative to the song's own recent peak)`: absolute level still decides whether anything
+is audible at all (real silence is exactly 0), while the song's own loudness sets the scale, so a
+good mix reaches dancing at any mastering level. Tests cover all four cases, including a quiet
+master and a metadata dropout mid-song.
+
+**Walk.** Two separate things made it read as a stiff glide, and the first one was the real
+culprit:
+
+1. **The arms never moved.** The upper body was driven by `lead`, computed from the difference in
+   the feet's *view-axis* position. Walking across the screen puts both feet at the same depth, so
+   `lead` was always ≈ 0: the arm swing, the shoulder ride and the head nod were all multiplied by
+   nothing. Measured over a cycle, the hands travelled 7 cm — effectively pinned to her sides.
+2. Knee flexion already reached 7°→69°, so "locked knees" was **not** the cause (the first
+   hypothesis, disproved by dumping the joints). The body still lacked the vertical travel and
+   weight shift that make a step read as weight, and the upper-body values were one-directional
+   sines rather than an authored cycle.
+
+Replaced with a **keyframed cycle** (`locomotion.rs`): contact, down, passing, up, contact — hips
+rising and falling twice per cycle, pelvis sway toward the carrying foot, pelvis twist and roll,
+arms swinging opposite their own leg, elbows closing on the forward swing, trunk lean swelling
+into each push-off. Every key is sampled by `Gait::phase`, which advances with distance travelled,
+so the cycle stays locked to the planted foot at any speed. The knee bend then comes from the hips
+through IK (an extra "loading sink" term was tried and measured to add nothing, so it was not
+kept — noted in the code so nobody adds it back).
+
+The regression test measures the two things that were actually wrong: the hand's travel relative
+to its shoulder across a cycle (a walking arm now moves >15 cm) and the knee's peak flexion. It
+was verified to fail on the old arm code and pass on the new.
+
+**Wardrobe.** All 13 built-in props are gone (`cat_ears`, `halo`, `witch_hat`, `wings`, …), along
+with their per-frame animation code and the fake physics-object hand posing (`hold_props`). The
+wardrobe is now only what the user loads: pick any glTF/GLB/VRM, choose a bone from 13, and set
+offset/rotation/scale. Files are spawned as a child scene of the bone's normalized attachment
+frame — the same one the rig uses — so they follow that bone exactly. `SetProps` carries the whole
+`Vec<PropSpec>`; the renderer builds, moves and despawns scenes to match. Verified live: a whole
+VRM scaled to 0.12 sits on her head and tilts with every dance pose.
+
+Regression suite: **165 tests pass** (85 app, 72 avatar, 8 protocol); 4 opt-in live tests are
+excluded from the default run.
+
 ### Chat input and music motion — 2026-11-12
 
 Follow-up from live Spotify playback: the old 0.3 confidence cutoff rejected real songs whose
@@ -151,7 +213,7 @@ validates its token, restarts it with backoff and puts it in a kill-on-close job
 | 8 | Click-through | **Pixel-accurate**: the hit mask is the alpha of the last presented frame |
 | 9 | Framing + lighting | 28° lens like the reference; day/dawn/sunset/night presets; `auto` follows the clock |
 | 10 | Music vibe | Groove branch scaled by the loudness the app measures from media apps |
-| 11 | Wardrobe props | All 13, with the reference's geometry, materials and per-frame motion |
+| 11 | Wardrobe props | **Replaced in the 2026-11-12 second pass**: 13 built-ins removed; props are now user-loaded models attached to a bone |
 | 12 | Head-pat hearts | Painted into the presented frame in screen space |
 | 13 | Spectrum removed | done in Phase 6 |
 
@@ -508,12 +570,53 @@ keystroke.
 - Avatar contact sheets without the app: `.\scripts\avatar-shots.ps1` (pictures in
   `target\shots`).
 - Standalone preview of the renderer, no app needed:
-  `ARIA_AVATAR_EMOTION=happy ARIA_AVATAR_PROPS=halo,cat_ears ARIA_AVATAR_LIGHTING=sunset
+  `ARIA_AVATAR_EMOTION=happy ARIA_AVATAR_LIGHTING=sunset
   ARIA_AVATAR_FRAMING=full ARIA_AVATAR_SIZE=390x555 target\debug\aria-avatar.exe`
+- A prop can be previewed standalone with `ARIA_AVATAR_PROPS="C:\path\hat.glb@head@0,0.12,0@1.0"`
+  (path@bone@offset x,y,z@scale); several props are separated by `;`.
 - In debug builds the app's log is mirrored to stderr, so a dev run is readable even when
   `%APPDATA%\Aria` is not writable (it was not, from the agent's sandboxed shell).
 
 ## Not done / open
+
+Presence/gaming update (2026-11-13): native activity sampling now runs independently every two
+seconds, with executable aliases for Valorant/Apex (including DX12), Steam/Epic manifest discovery
+on custom drives, engine evidence and launcher/editor exclusions. Protected process names fall
+back to Toolhelp enumeration. Controller input and fullscreen media viewing count toward presence.
+Game sessions survive Alt-Tab; local transitions are queued and revalidated before speech, with
+scripted fallback lines when AI is unavailable. Smart Dodge uses a temporary size independently
+of Game Copilot. The Control Center shows current detection evidence, and chat can query it through
+`get_pc_activity`. Copilot screenshots use the game monitor and short background requests.
+Both avatar/chat windows recover actual topmost order without taking focus. Validation:
+`cargo build --workspace`; 176 default tests plus the native `live_topmost` test passed. Actual
+Valorant/Apex sessions were not launched; their executable/focus/session cases are regression-tested.
+Exclusive fullscreen games can bypass desktop overlays; use borderless/windowed mode.
+
+Valorant data update (2026-11-13): added opt-in automatic signed-in account discovery from the
+local Riot Client, with an optional test override instead of a fixed Riot ID. The real-client
+probe identified `Akii#myr` automatically; the current launcher supports local RSO userinfo before
+the game starts, while `/chat/v1/session` returns 404 at that stage. Region comes from the running
+Valorant deployment. Local credentials stay inside a dedicated fixed-loopback HTTPS client with
+proxies/redirects disabled; no Tracker.gg key is stored or used.
+
+Structured game-window frames capture only visible own-player statistics, with fresh native focus
+checks, account revalidation before/after analysis, confidence thresholds, null missing fields,
+and timestamps/staleness. The default interval is 60 seconds. Valorant bypasses generic tactical
+game commentary. Readable results screens produce a once-per-visit recap; completed official
+VAL-MATCH-V1 JSON imports select the detected PUUID and calculate K/D, ACS, ADR and hit-based
+headshot percentage only from complete underlying data. Each account keeps a bounded 20-record
+cache, with serialised/merged writes for concurrent imports and captures. The Control Center has
+account status, current observations, recap, refresh/import/disconnect and optional test setup.
+Chat can query `get_valorant_stats` for sourced observations and reflective analysis.
+
+Validation: 191 default workspace tests pass, including account login/logout, ownership, metric
+denominators, missing/duplicate rounds, ambiguous player names, stale/Alt-Tab observations,
+account-switch invalidation and bounded/deduplicated history. The ignored `live_account_discovery`
+probe passed against the actual Riot Client. `cargo build --workspace` passed. Actual in-game
+vision extraction has not been exercised; it needs a visible scoreboard/results screen and a
+vision-capable configured model. Automatic remote Riot match fetching/RSO is not connected; the
+official match parser is the adapter boundary for future approved backend access. Screen records
+have locally generated IDs, so they cannot reliably be reconciled with official imported match IDs.
 
 - Clean builds are still ~30 min until the Defender exclusion is applied.
 - Dropping her onto a window does not catch her; only aimed jumps land on windows.

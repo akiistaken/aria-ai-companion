@@ -22,6 +22,7 @@ mod tray;
 mod util;
 mod voice;
 mod wardrobe;
+mod valorant;
 
 use slint::ComponentHandle;
 

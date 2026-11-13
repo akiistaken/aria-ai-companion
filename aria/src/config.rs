@@ -93,6 +93,12 @@ pub struct Settings {
     pub presence_guardian_enabled: bool,
     pub automatic_game_copilot_enabled: bool,
     pub smart_gaming_dodge_enabled: bool,
+    /// Opt-in: identify the local Riot session and send visible game frames to the AI.
+    pub valorant_enabled: bool,
+    pub valorant_capture_interval_secs: u64,
+    /// Optional development override; normal use discovers the signed-in account.
+    pub valorant_test_riot_id: String,
+    pub valorant_test_region: String,
     pub edge_snapping_enabled: bool,
     pub discord_presence_enabled: bool,
     /// Little things she does on her own when nothing is going on, chosen by the AI.
@@ -140,6 +146,10 @@ impl Default for Settings {
             presence_guardian_enabled: true,
             automatic_game_copilot_enabled: true,
             smart_gaming_dodge_enabled: true,
+            valorant_enabled: false,
+            valorant_capture_interval_secs: 60,
+            valorant_test_riot_id: String::new(),
+            valorant_test_region: "ap".into(),
             edge_snapping_enabled: true,
             discord_presence_enabled: false,
             idle_events_enabled: true,
@@ -152,6 +162,12 @@ impl Default for Settings {
 
 impl Settings {
     fn clamp(&mut self) {
+        self.valorant_capture_interval_secs = self.valorant_capture_interval_secs.clamp(30, 300);
+        self.valorant_test_riot_id = self.valorant_test_riot_id.trim().to_string();
+        self.valorant_test_region = self.valorant_test_region.trim().to_lowercase();
+        if !["ap", "na", "eu", "kr", "br", "latam"].contains(&self.valorant_test_region.as_str()) {
+            self.valorant_test_region = "ap".into();
+        }
         self.avatar_scale = self.avatar_scale.clamp(0.5, 2.5);
         self.camera_zoom = self.camera_zoom.clamp(0.4, 3.0);
         self.camera_y_offset = self.camera_y_offset.clamp(-0.8, 0.8);

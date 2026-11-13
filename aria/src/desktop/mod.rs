@@ -18,6 +18,7 @@ pub mod beat;
 pub mod com;
 pub mod cua;
 pub mod input;
+mod game_catalog;
 pub mod launcher;
 pub mod media;
 pub mod presence;

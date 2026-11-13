@@ -157,16 +157,13 @@ pub fn sync_studio(app: &AppHandle) {
         .collect();
     studio.set_traits(ModelRc::new(VecModel::from(trait_rows)));
 
-    let prop_rows: Vec<crate::app::PropCell> = crate::wardrobe::PROPS
+    let prop_rows: Vec<crate::app::PropCell> = crate::wardrobe::all(&settings)
         .iter()
-        .map(|(key, label)| crate::app::PropCell {
-            key: SharedString::from(*key),
-            label: SharedString::from(*label),
-            active: settings
-                .avatar_props
-                .get(*key)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+        .map(|prop| crate::app::PropCell {
+            key: SharedString::from(prop.id.as_str()),
+            label: SharedString::from(crate::wardrobe::file_name(&prop.path)),
+            bone: SharedString::from(crate::wardrobe::bone_label(&prop.bone)),
+            active: prop.enabled,
         })
         .collect();
     studio.set_props(ModelRc::new(VecModel::from(prop_rows)));
@@ -204,7 +201,12 @@ pub fn sync_studio(app: &AppHandle) {
     studio.set_music_vibe(settings.music_vibe_enabled);
     studio.set_proactive(settings.proactive_enabled);
     studio.set_presence(settings.presence_guardian_enabled);
+    studio.set_activity_status(crate::desktop::presence::latest().description().into());
     studio.set_gaming_copilot(settings.automatic_game_copilot_enabled);
+    studio.set_valorant_on(settings.valorant_enabled);
+    studio.set_valorant_test_id(settings.valorant_test_riot_id.clone().into());
+    studio.set_valorant_test_region(settings.valorant_test_region.clone().into());
+    super::valorant::sync(app);
     studio.set_game_dodge(settings.smart_gaming_dodge_enabled);
     studio.set_edge_snap(settings.edge_snapping_enabled);
     studio.set_discord(settings.discord_presence_enabled);
@@ -390,6 +392,59 @@ pub fn wire_studio(studio: &ControlCenter) {
         set_gaming_copilot
     );
     toggle_field!(on_toggle_dodge, smart_gaming_dodge_enabled, set_game_dodge);
+
+    on!(on_toggle_valorant, |on| {
+        config::update(|s| s.valorant_enabled = on);
+        crate::valorant::reset();
+        with_app(|app| {
+            if let Some(s) = &app.borrow().studio { s.set_valorant_on(on); }
+            super::valorant::sync(app);
+        });
+    });
+    on!(on_save_valorant_test, |id, region| {
+        let id = id.trim().to_string();
+        let region = region.trim().to_lowercase();
+        let valid = (id.is_empty() || crate::valorant::account::valid_riot_id(&id))
+            && ["ap", "na", "eu", "kr", "br", "latam"].contains(&region.as_str());
+        if valid {
+            config::update(|s| {
+                s.valorant_test_riot_id = id.clone();
+                s.valorant_test_region = region.clone();
+            });
+            crate::valorant::reset();
+        }
+        with_app(|app| {
+            super::valorant::sync(app);
+            if let Some(s) = &app.borrow().studio {
+                if valid {
+                    s.set_valorant_test_id(id.into());
+                    s.set_valorant_test_region(region.into());
+                    s.set_valorant_status("Account setup saved; checking the session shortly".into());
+                } else {
+                    s.set_valorant_status("Use name#tag and region ap, na, eu, kr, br or latam".into());
+                }
+            }
+        });
+    });
+    on!(on_refresh_valorant, || {
+        crate::valorant::request_refresh();
+        with_app(super::valorant::sync);
+    });
+    on!(on_import_valorant, || { super::valorant::import_file(); });
+    on!(on_disconnect_valorant, || {
+        config::update(|s| {
+            s.valorant_enabled = false;
+            s.valorant_test_riot_id.clear();
+        });
+        crate::valorant::reset();
+        with_app(|app| {
+            if let Some(s) = &app.borrow().studio {
+                s.set_valorant_on(false);
+                s.set_valorant_test_id("".into());
+            }
+            super::valorant::sync(app);
+        });
+    });
     toggle_field!(on_toggle_edge_snap, edge_snapping_enabled, set_edge_snap);
     toggle_field!(
         on_toggle_capsule_autohide,
@@ -569,23 +624,9 @@ pub fn wire_studio(studio: &ControlCenter) {
         let key = key.to_string();
         let mut active = false;
         config::update(|s| {
-            let current = s
-                .avatar_props
-                .get(&key)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            active = !current;
-            s.avatar_props
-                .insert(key.clone(), serde_json::json!(active));
-            if active {
-                let other = match key.as_str() {
-                    "coffee_mug" => Some("game_controller"),
-                    "game_controller" => Some("coffee_mug"),
-                    _ => None,
-                };
-                if let Some(other) = other {
-                    s.avatar_props.insert(other.into(), serde_json::json!(false));
-                }
+            if let Some(prop) = s.avatar_props.get_mut(&key).and_then(|v| v.as_object_mut()) {
+                active = !prop.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                prop.insert("enabled".into(), serde_json::json!(active));
             }
         });
         with_app(|app| {
@@ -593,15 +634,94 @@ pub fn wire_studio(studio: &ControlCenter) {
             sync_studio(app);
             if let Some(s) = app.borrow().studio.as_ref() {
                 s.set_status_text(
-                    format!(
-                        "{} {}",
-                        if active { "Equipped" } else { "Removed" },
-                        crate::wardrobe::label(&key)
-                    )
-                    .into(),
+                    format!("{} {key}", if active { "Shown:" } else { "Hidden:" }).into(),
                 );
             }
         });
+    });
+
+    on!(on_add_prop, || {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("3D prop", &["glb", "gltf", "vrm"])
+            .set_title("Pick a prop to attach to Aria")
+            .pick_file()
+        else {
+            return;
+        };
+        let path = path.to_string_lossy().to_string();
+        config::update(|s| {
+            s.avatar_props.insert(
+                path.clone(),
+                serde_json::json!({
+                    "path": path,
+                    "bone": "head",
+                    "offset": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": 1.0,
+                    "enabled": true,
+                }),
+            );
+        });
+        with_app(|app| {
+            crate::app::apply_avatar_settings(app);
+            sync_studio(app);
+            if let Some(s) = app.borrow().studio.as_ref() {
+                s.set_status_text(
+                    format!("Loaded {}", crate::wardrobe::file_name(&path)).into(),
+                );
+            }
+        });
+    });
+
+    on!(on_remove_prop, |key| {
+        let key = key.to_string();
+        config::update(|s| {
+            s.avatar_props.remove(&key);
+        });
+        with_app(|app| {
+            crate::app::apply_avatar_settings(app);
+            sync_studio(app);
+        });
+    });
+
+    // The bone is chosen from the same list the wardrobe declares; the dialog is a quick cycle
+    // through it, which is enough for a desktop pet and needs no extra window.
+    on!(on_pick_prop_bone, |key| {
+        let key = key.to_string();
+        let mut chosen = String::new();
+        config::update(|s| {
+            let Some(prop) = s.avatar_props.get_mut(&key).and_then(|v| v.as_object_mut()) else {
+                return;
+            };
+            let current = prop.get("bone").and_then(|v| v.as_str()).unwrap_or("head").to_string();
+            let bones = crate::wardrobe::BONES;
+            let next = bones
+                .iter()
+                .position(|(k, _)| *k == current)
+                .map(|i| (i + 1) % bones.len())
+                .unwrap_or(0);
+            chosen = bones[next].0.to_string();
+            prop.insert("bone".into(), serde_json::json!(chosen));
+        });
+        with_app(|app| {
+            crate::app::apply_avatar_settings(app);
+            sync_studio(app);
+            if let Some(s) = app.borrow().studio.as_ref() {
+                s.set_status_text(
+                    format!("Attached to {}", crate::wardrobe::bone_label(&chosen)).into(),
+                );
+            }
+        });
+    });
+
+    on!(on_set_prop_scale, |key, scale| {
+        let key = key.to_string();
+        config::update(|s| {
+            if let Some(prop) = s.avatar_props.get_mut(&key).and_then(|v| v.as_object_mut()) {
+                prop.insert("scale".into(), serde_json::json!(scale.clamp(0.05, 8.0)));
+            }
+        });
+        with_app(crate::app::apply_avatar_settings);
     });
 
     on!(on_headpat, || {
