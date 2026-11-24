@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 
 use msedge_tts::tts::client::connect;
 use msedge_tts::tts::SpeechConfig;
+use cpal::traits::{DeviceTrait, HostTrait};
 
 use super::lipsync::LipSync;
 use super::{SHUTTING_DOWN, SPEAKING, SPEECH_SEQ};
@@ -201,11 +202,17 @@ fn synthesize(text: &str, emotion: &str, voice_key: &str, out_file: &Path) -> bo
         rate: delivery.rate,
         volume: 0,
     };
-    let Ok(mut client) = connect() else {
-        log::warn!("edge-tts connection failed");
-        return false;
+    let mut client = match connect() {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("edge-tts connection failed: {error}");
+            return false;
+        }
     };
-    match client.synthesize(text, &config) {
+    // The vendored client inserts text directly into SSML. Chat replies can contain XML
+    // characters (for example "K/D < 1"), which otherwise invalidate the entire utterance.
+    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    match client.synthesize(&escaped, &config) {
         Ok(audio) if audio.audio_bytes.len() > 200 => {
             // Written to a temp name first, so a half-written file never looks cached.
             let tmp = out_file.with_extension("tmp.mp3");
@@ -214,9 +221,10 @@ fn synthesize(text: &str, emotion: &str, voice_key: &str, out_file: &Path) -> bo
                 return true;
             }
             let _ = std::fs::remove_file(&tmp);
+            log::warn!("could not write synthesized speech to {}", out_file.display());
             false
         }
-        Ok(_) => false,
+        Ok(_) => { log::warn!("edge-tts returned no usable audio"); false }
         Err(e) => {
             log::warn!("edge-tts synthesis failed: {e}");
             false
@@ -224,34 +232,83 @@ fn synthesize(text: &str, emotion: &str, voice_key: &str, out_file: &Path) -> bo
     }
 }
 
-fn output() -> &'static Mutex<Option<rodio::MixerDeviceSink>> {
-    static OUTPUT: OnceLock<Mutex<Option<rodio::MixerDeviceSink>>> = OnceLock::new();
+struct Output {
+    device_key: String,
+    sink: rodio::MixerDeviceSink,
+}
+
+static OUTPUT_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn output() -> &'static Mutex<Option<Output>> {
+    static OUTPUT: OnceLock<Mutex<Option<Output>>> = OnceLock::new();
     OUTPUT.get_or_init(|| Mutex::new(None))
 }
 
+fn output_device() -> Option<cpal::Device> {
+    let host = cpal::default_host();
+    let wanted = crate::config::get().output_audio_device;
+    if !wanted.is_empty() {
+        if let Some(device) = host.output_devices().ok().and_then(|mut devices| devices.find(|d| d.to_string() == wanted)) {
+            return Some(device);
+        }
+        log::warn!("selected speech output {wanted} is unavailable; using the system default");
+    }
+    host.default_output_device()
+}
+
+/// The next utterance opens the newly selected output. Never drop a stream on its callback.
+pub fn reset_output() {
+    OUTPUT_FAILED.store(true, Ordering::SeqCst);
+}
+
 /// Starts playback of one utterance. [`LipSync`] clears `SPEAKING` when it ends.
-fn play_file(path: &Path, seq: i64) -> bool {
-    let Ok(file) = std::fs::File::open(path) else { return false };
+#[derive(Debug, PartialEq)]
+enum PlaybackError { CachedAudio, Output }
+
+fn play_file(path: &Path, seq: i64) -> Result<(), PlaybackError> {
+    let file = std::fs::File::open(path).map_err(|_| PlaybackError::CachedAudio)?;
     let Ok(source) = rodio::Decoder::try_from(std::io::BufReader::new(file)) else {
         log::warn!("could not decode {}", path.display());
-        return false;
+        return Err(PlaybackError::CachedAudio);
     };
+    let Some(device) = output_device() else {
+        log::warn!("no audio output device");
+        return Err(PlaybackError::Output);
+    };
+    let device_key = device.id().map(|id| id.to_string()).unwrap_or_else(|_| device.to_string());
     let mut guard = output().lock().unwrap_or_else(|e| e.into_inner());
+    if OUTPUT_FAILED.swap(false, Ordering::SeqCst) || guard.as_ref().is_some_and(|output| output.device_key != device_key) {
+        *guard = None;
+    }
     if guard.is_none() {
-        match rodio::DeviceSinkBuilder::open_default_sink() {
-            Ok(handle) => *guard = Some(handle),
+        let builder = rodio::DeviceSinkBuilder::from_device(device.clone());
+        let opened = builder.and_then(|builder| builder.with_error_callback(|error| {
+            log::warn!("speech output failed: {error}; reconnecting on the next utterance");
+            OUTPUT_FAILED.store(true, Ordering::SeqCst);
+            SPEAKING.store(false, Ordering::SeqCst);
+        }).open_sink_or_fallback());
+        match opened {
+            Ok(sink) => {
+                log::info!("speech output connected: {device}");
+                *guard = Some(Output { device_key, sink });
+            }
             Err(e) => {
                 log::warn!("no audio output device: {e}");
-                return false;
+                return Err(PlaybackError::Output);
             }
         }
     }
     match guard.as_ref() {
         Some(handle) => {
-            handle.mixer().add(LipSync::new(source, seq));
-            true
+            if SPEECH_SEQ.load(Ordering::SeqCst) != seq || SHUTTING_DOWN.load(Ordering::SeqCst) {
+                return Err(PlaybackError::Output);
+            }
+            SPEAKING.store(true, Ordering::SeqCst);
+            handle.sink.mixer().add(LipSync::new(source, seq));
+            log::info!("speech playback started (utterance {seq})");
+            Ok(())
         }
-        None => false,
+        None => Err(PlaybackError::Output),
     }
 }
 
@@ -267,7 +324,7 @@ pub fn speak_async(text: &str, emotion: &str) {
         return;
     }
     let seq = SPEECH_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    SPEAKING.store(true, Ordering::SeqCst);
+    SPEAKING.store(false, Ordering::SeqCst);
     let emotion = emotion.to_string();
     std::thread::spawn(move || {
         let cached = cache_file(&spoken, &voice_key, &emotion);
@@ -277,11 +334,53 @@ pub fn speak_async(text: &str, emotion: &str) {
                 true
             });
         let current = SPEECH_SEQ.load(Ordering::SeqCst) == seq;
-        if (!ready || SHUTTING_DOWN.load(Ordering::SeqCst) || !current || !play_file(&cached, seq))
+        let playback = if ready && !SHUTTING_DOWN.load(Ordering::SeqCst) && current {
+            play_file(&cached, seq)
+        } else { Err(PlaybackError::Output) };
+        let mut played = playback.is_ok();
+        if playback == Err(PlaybackError::CachedAudio) && current && !SHUTTING_DOWN.load(Ordering::SeqCst) {
+            // A damaged old cache entry must not silence this phrase permanently.
+            let _ = std::fs::remove_file(&cached);
+            played = synthesize(&spoken, &emotion, &voice_key, &cached)
+                && SPEECH_SEQ.load(Ordering::SeqCst) == seq && !SHUTTING_DOWN.load(Ordering::SeqCst)
+                && play_file(&cached, seq).is_ok();
+        }
+        if !played
             && SPEECH_SEQ.load(Ordering::SeqCst) == seq {
+                log::warn!("speech utterance {seq} could not be played");
                 SPEAKING.store(false, Ordering::SeqCst);
             }
     });
+}
+
+/// Synthesizes and plays a short line, reporting decoded and Windows session audio levels.
+pub(crate) fn diagnose() -> serde_json::Value {
+    let voice = crate::config::get().tts_voice;
+    let path = cache_file("Aria voice playback test. You should hear this sentence.", &voice, "talking");
+    if !synthesize("Aria voice playback test. You should hear this sentence.", "talking", &voice, &path) {
+        return serde_json::json!({"error": "Speech synthesis failed; see aria.log"});
+    }
+    let samples: Vec<_> = match std::fs::File::open(&path).ok().and_then(|file| rodio::Decoder::try_from(file).ok()) {
+        Some(decoder) => decoder.collect(),
+        None => return serde_json::json!({"error": "Synthesized audio could not be decoded"}),
+    };
+    let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+    let seq = SPEECH_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    SPEAKING.store(true, Ordering::SeqCst);
+    if play_file(&path, seq).is_err() {
+        SPEAKING.store(false, Ordering::SeqCst);
+        return serde_json::json!({"error": "Could not start audio output", "decoded_peak": peak});
+    }
+    let activity = crate::desktop::audio::audio_activity(2500);
+    let session_peak = activity.apps.iter().filter(|app| app.pid == std::process::id())
+        .fold(0.0f32, |peak, app| peak.max(app.peak));
+    let started = std::time::Instant::now();
+    while SPEAKING.load(Ordering::SeqCst) && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    serde_json::json!({"decoded_samples": samples.len(), "decoded_peak": peak,
+        "session_peak": session_peak, "playback_finished": !SPEAKING.load(Ordering::SeqCst),
+        "audio_output": crate::diagnostics::audio_output()})
 }
 
 #[cfg(test)]

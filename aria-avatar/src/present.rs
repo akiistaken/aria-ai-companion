@@ -6,8 +6,9 @@
 //! exactly a pixel with alpha, so hit-testing is pixel-accurate for any model, prop or pose.
 
 use bevy::prelude::*;
+use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::Extent3d;
-use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use bevy::render::renderer::RenderDevice;
 
 use crate::behaviors::{AvatarCamera, AvatarState};
 use crate::hearts::Hearts;
@@ -21,9 +22,7 @@ pub struct OffscreenTarget(pub Handle<Image>);
 #[derive(Resource, Default)]
 pub struct Presenter {
     surface: Option<LayeredSurface>,
-    pub in_flight: bool,
-    /// When the in-flight capture was requested, so a lost capture cannot stall presentation.
-    requested_at: Option<std::time::Instant>,
+    capture: Option<(Entity, u32, u32)>,
     paused: bool,
     logged: bool,
     pub captures: u64,
@@ -32,20 +31,6 @@ pub struct Presenter {
 impl Presenter {
     pub fn set_surface(&mut self, surface: LayeredSurface) {
         self.surface = Some(surface);
-    }
-
-    fn ready(&mut self) -> bool {
-        if self.in_flight {
-            // A capture that never came back (device lost, resize) must not wedge the pipeline.
-            let stale = self
-                .requested_at
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(1))
-                .unwrap_or(true);
-            if stale {
-                self.in_flight = false;
-            }
-        }
-        self.surface.is_some() && !self.in_flight && !self.paused
     }
 }
 
@@ -99,29 +84,63 @@ impl HitMask {
 /// world is mid-update, so a `ResMut` there is silently unavailable. The image is parked and a
 /// regular `Update` system presents it.
 #[derive(Resource, Default)]
-pub struct LatestFrame(pub Option<Image>);
+pub struct LatestFrame(pub Option<CapturedFrame>);
 
-/// Spawns the next screenshot request when the previous one has been consumed.
+pub struct CapturedFrame {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Packs a mapped GPU texture, whose rows are padded to 256 bytes, into RGBA8.
+fn pack_rgba(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let row = width as usize * 4;
+    let stride = RenderDevice::align_copy_bytes_per_row(row);
+    if row == 0 || height == 0 || data.len() < stride * height as usize {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(row * height as usize);
+    for pixels in data.chunks_exact(stride).take(height as usize) {
+        rgba.extend_from_slice(&pixels[..row]);
+    }
+    Some(rgba)
+}
+
+/// Keeps one readback entity for the current viewport, using Bevy's pooled staging buffers.
+/// A frame is copied directly from the target after rendering, with no screenshot texture/blit
+/// pass or per-frame entities. Both handoff slots keep only the latest completed frame.
 pub fn request_capture(
     mut commands: Commands,
     target: Option<Res<OffscreenTarget>>,
     mut presenter: ResMut<Presenter>,
-    latest: Res<LatestFrame>,
+    images: Res<Assets<Image>>,
 ) {
     let Some(target) = target else {
         return;
     };
-    // Only request once the previous frame has been presented, so capture cannot outrun display.
-    if latest.0.is_some() || !presenter.ready() {
+    if presenter.paused || presenter.surface.is_none() {
+        if let Some((entity, _, _)) = presenter.capture.take() {
+            commands.entity(entity).despawn();
+        }
         return;
     }
-    presenter.in_flight = true;
-    presenter.requested_at = Some(std::time::Instant::now());
-    commands
-        .spawn(Screenshot::image(target.0.clone()))
-        .observe(|captured: On<ScreenshotCaptured>, mut latest: ResMut<LatestFrame>| {
-            latest.0 = Some(captured.image.clone());
-        });
+    let Some(image) = images.get(&target.0) else { return };
+    let (width, height) = (image.width(), image.height());
+    if presenter.capture.is_some_and(|(_, w, h)| w == width && h == height) {
+        return;
+    }
+    if let Some((entity, _, _)) = presenter.capture.take() {
+        commands.entity(entity).despawn();
+    }
+    let entity = commands
+        .spawn(Readback::texture(target.0.clone()))
+        .observe(move |captured: On<ReadbackComplete>, mut latest: ResMut<LatestFrame>| {
+            if let Some(rgba) = pack_rgba(&captured.data, width, height) {
+                latest.0 = Some(CapturedFrame { rgba, width, height });
+            }
+        })
+        .id();
+    presenter.capture = Some((entity, width, height));
 }
 
 /// Presents the most recent capture, painting the head-pat hearts over it first.
@@ -132,21 +151,18 @@ pub fn present_latest(
     mut hit: ResMut<HitMask>,
     mut hearts: ResMut<Hearts>,
     demo: Option<ResMut<crate::demo::Demo>>,
+    state: Res<AvatarState>,
 ) {
     hearts.step(time.delta_secs().min(0.1));
-    let Some(mut image) = latest.0.take() else { return };
-    presenter.in_flight = false;
-    let (width, height) = (image.width(), image.height());
-    let Some(mut rgba) = image.data.take() else {
-        log::warn!("present: frame without data ({width}x{height})");
-        return;
-    };
+    let Some(CapturedFrame { mut rgba, width, height }) = latest.0.take() else { return };
+    // A resized target may still have an old capture on the GPU. Never resize the window back
+    // to the old bitmap, and do not replace the hit mask with obsolete geometry.
+    if state.viewport != (width, height) { return; }
     if !presenter.logged {
         presenter.logged = true;
         let covered = rgba.as_chunks::<4>().0.iter().filter(|px| px[3] > 0).count();
         log::info!(
-            "first frame {width}x{height} {:?}, {covered} of {} pixels covered",
-            image.texture_descriptor.format,
+            "first frame {width}x{height} RGBA8, {covered} of {} pixels covered",
             width * height
         );
     }
@@ -217,7 +233,24 @@ pub fn apply_pause(
 
 #[cfg(test)]
 mod tests {
-    use super::HitMask;
+    use super::{pack_rgba, HitMask};
+
+    #[test]
+    fn readback_strips_padding_without_changing_color_or_alpha() {
+        for width in [1, 64, 65, 260] {
+            let row = width as usize * 4;
+            let stride = bevy::render::renderer::RenderDevice::align_copy_bytes_per_row(row);
+            let pixels: Vec<u8> = (0..row * 3).map(|i| (i % 251) as u8).collect();
+            let mut padded = vec![255; stride * 3];
+            for y in 0..3 {
+                padded[y * stride..y * stride + row].copy_from_slice(&pixels[y * row..(y + 1) * row]);
+            }
+            assert_eq!(pack_rgba(&padded, width, 3), Some(pixels));
+            assert!(pack_rgba(&padded[..padded.len() - 1], width, 3).is_none());
+        }
+        assert!(pack_rgba(&[], 0, 3).is_none());
+        assert!(pack_rgba(&[], 3, 0).is_none());
+    }
 
     #[test]
     fn hit_mask_finds_covered_pixels_with_a_margin() {

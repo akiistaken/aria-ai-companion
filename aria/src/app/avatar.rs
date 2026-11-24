@@ -67,6 +67,10 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
             // the whole state again.
             let stage = app.borrow().stage.clone();
             stage.reset_sent_state();
+            // Rely on UpdateLayeredWindow(ULW_ALPHA) per-pixel alpha for empty-space click-through
+            // rather than toggling WS_EX_TRANSPARENT on hover, so clicks on the model are never
+            // lost during IPC/frame latency when an active window is behind Aria.
+            stage.set_click_through(false);
             app.borrow_mut().region_key = None;
             apply_avatar_settings(app);
             {
@@ -109,9 +113,6 @@ pub(crate) fn on_avatar_event(app: &AppHandle, event: aria_protocol::Event) {
         // Right-click on the model shows the chat bar; its ⋯ button opens the menu.
         Event::ContextMenu => show_bar(app),
         Event::HoverChanged { over } => {
-            // Over the model the window must accept clicks; over empty space it must not, so the
-            // desktop underneath stays usable.
-            app.borrow().stage.set_click_through(!over);
             app.borrow_mut().over_model = over;
         }
         // Where her feet are in the window and how big she is: physics stands her on the taskbar

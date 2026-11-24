@@ -1,5 +1,5 @@
 //! Win32 helpers: enumerate windows, map them to processes, force foreground, idle time,
-//! screen capture and working-set trimming.
+//! and screen capture.
 
 use serde::Serialize;
 use std::collections::HashMap;
@@ -13,8 +13,8 @@ use windows::Win32::Graphics::Gdi::{
     SRCCOPY,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
-    SetProcessWorkingSetSize, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_MENU};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -84,10 +84,10 @@ pub fn process_name(pid: u32) -> String {
     if !path.is_empty() { return path.rsplit(['\\', '/']).next().unwrap_or_default().to_string(); }
     // Anti-cheat/protected processes can deny image-path queries. The process snapshot still
     // exposes their executable names without opening the game or reading its memory.
-    process_snapshot_names().get(&pid).cloned().unwrap_or_default()
+    running_process_names().get(&pid).cloned().unwrap_or_default()
 }
 
-fn process_snapshot_names() -> HashMap<u32, String> {
+pub fn running_process_names() -> HashMap<u32, String> {
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
@@ -131,7 +131,13 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let collector = &mut *(lparam.0 as *mut Vec<WindowInfo>);
     let visible = IsWindowVisible(hwnd).as_bool();
 
-    let len = GetWindowTextLengthW(hwnd);
+    let mut pid = 0u32;
+    let window_thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    // GetWindowText on another thread of our own process sends synchronous WM_GETTEXT.
+    // Workers must not wait for Slint's UI thread while the UI samples native state too.
+    let own_other_thread = pid == std::process::id() && window_thread != GetCurrentThreadId();
+
+    let len = if own_other_thread { 0 } else { GetWindowTextLengthW(hwnd) };
     let mut title = String::new();
     if len > 0 {
         let mut buf = vec![0u16; len as usize + 1];
@@ -148,9 +154,6 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     } else {
         String::new()
     };
-
-    let mut pid = 0u32;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
 
     collector.push(WindowInfo {
         hwnd: hwnd.0 as isize,
@@ -199,6 +202,11 @@ pub fn find_windows(
 }
 
 pub fn window_title(hwnd: HWND) -> String {
+    let mut pid = 0;
+    let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == std::process::id() && thread != unsafe { GetCurrentThreadId() } {
+        return String::new();
+    }
     let len = unsafe { GetWindowTextLengthW(hwnd) };
     if len <= 0 {
         return String::new();
@@ -598,14 +606,6 @@ fn capture_jpeg_b64(cap: Capture) -> Option<String> {
     Some(crate::util::base64(&buf.into_inner()))
 }
 
-/// Asks Windows to trim unused physical RAM from the working set.
-pub fn trim_working_set() -> bool {
-    unsafe {
-        let process = GetCurrentProcess();
-        SetProcessWorkingSetSize(process, usize::MAX, usize::MAX).is_ok()
-    }
-}
-
 /// True on the lock/UAC secure desktop. A missing foreground during Alt-Tab isn't a lock.
 pub fn session_locked() -> bool {
     use windows::Win32::Foundation::HANDLE;
@@ -719,6 +719,11 @@ pub fn move_windows_together(moves: &[(isize, i32, i32)]) -> bool {
     }
 }
 
+/// Current foreground window handle (`0` when unavailable).
+pub fn foreground_hwnd() -> isize {
+    unsafe { GetForegroundWindow().0 as isize }
+}
+
 /// Makes sure a window sits in the topmost z-order band, without activating it.
 ///
 /// Returns true after a successful correction. Checks actual z-order as well as the style flag.
@@ -735,8 +740,9 @@ pub fn ensure_topmost(hwnd: isize) -> bool {
         if !IsWindowVisible(handle).as_bool() { return false; }
         let mut above = GetWindow(handle, GW_HWNDPREV).unwrap_or_default();
         let mut covered = false;
-        // Window order can change concurrently; bound the walk to keep the UI responsive.
-        for _ in 0..256 {
+        // Window order can change concurrently; bound the walk to keep the UI responsive while
+        // surviving desktops with hundreds of hidden top-level helper windows.
+        for _ in 0..4096 {
             if above.0.is_null() { break; }
             let mut pid = 0;
             GetWindowThreadProcessId(above, Some(&mut pid));
@@ -795,11 +801,11 @@ pub fn hide_from_taskbar(hwnd: isize) {
 
 /// Enables or disables click-through on the avatar window.
 ///
-/// `WS_EX_TRANSPARENT` makes the window let mouse input fall through to whatever is beneath it,
-/// which is what turns the empty space around the model into normal desktop.
+/// `WS_EX_TRANSPARENT` makes the window let mouse input fall through to whatever is beneath it.
 pub fn set_click_through(hwnd: isize, enabled: bool) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TRANSPARENT,
     };
     if hwnd == 0 {
         return;
@@ -816,6 +822,16 @@ pub fn set_click_through(hwnd: isize, enabled: bool) {
         };
         if updated != style {
             SetWindowLongW(handle, GWL_EXSTYLE, updated);
+            // Extended-style changes stay cached by Windows/DWM until SetWindowPos flushes them.
+            let _ = SetWindowPos(
+                handle,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
         }
     }
 }

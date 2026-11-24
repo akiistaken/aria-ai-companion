@@ -8,7 +8,7 @@
 //! the beat of ordinary pop, EDM, hip-hop and Bollywood tracks.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Samples per second of the envelope.
@@ -214,6 +214,7 @@ static LATEST: Mutex<Option<Music>> = Mutex::new(None);
 static SOURCE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
 /// Set when the song or the app changed, so the worker starts the new one from a clean slate.
 static RESET: AtomicBool = AtomicBool::new(false);
+static WAKE: Condvar = Condvar::new();
 
 /// Starts or pauses beat tracking. `source_exe` is the music app (`spotify.exe`, `chrome.exe`),
 /// or empty for "any app but Aria". A new track starts the old song's beat history over.
@@ -241,8 +242,9 @@ pub fn listen(on: bool, source_exe: &str, track: &str) {
         RESET.store(true, Ordering::SeqCst);
     }
     source.0 = exe;
-    drop(source);
     LISTENING.store(on, Ordering::Relaxed);
+    drop(source);
+    WAKE.notify_one();
     if !on {
         *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
         return;
@@ -265,6 +267,8 @@ fn run() {
     let ours = std::process::id();
     let mut tracker = BeatTracker::default();
     let mut meters: Option<crate::desktop::audio::MeterSet> = None;
+    let mut selected_pids = std::collections::HashSet::new();
+    let mut selected_source = String::new();
     let mut last_estimate = Instant::now();
     let mut estimate = None;
     let mut rhythm = RhythmLock::default();
@@ -275,7 +279,11 @@ fn run() {
             tracker = BeatTracker::default();
             rhythm = RhythmLock::default();
             estimate = None;
-            std::thread::sleep(Duration::from_millis(100));
+            meters = None;
+            let guard = SOURCE.lock().unwrap_or_else(|e| e.into_inner());
+            drop(WAKE.wait_while(guard, |_| !LISTENING.load(Ordering::Relaxed))
+                .unwrap_or_else(|e| e.into_inner()));
+            last_estimate = Instant::now();
             continue;
         }
         let started = Instant::now();
@@ -289,18 +297,22 @@ fn run() {
             last_estimate = Instant::now();
         }
         // New players appear and old ones go; re-enumerate the sessions every few seconds.
-        if meters.as_ref().is_none_or(|m| m.age() > Duration::from_secs(4)) {
+        let refresh = meters.as_ref().is_none_or(|m| m.age() > Duration::from_secs(4));
+        if refresh {
             meters = crate::desktop::audio::MeterSet::open();
         }
-        let peak = meters.as_ref().map_or(0.0, |m| {
-            m.peak(|pid| {
-                if pid == ours {
-                    return false;
-                }
-                let exe = crate::desktop::win32::process_name(pid);
-                if source.0.is_empty() { exe != "aria-avatar.exe" } else { exe == source.0 }
-            })
-        });
+        if refresh || selected_source != source.0 {
+            selected_source.clone_from(&source.0);
+            selected_pids.clear();
+            if let Some(meters) = meters.as_ref() {
+                selected_pids.extend(meters.process_ids().filter(|&pid| {
+                    if pid == 0 || pid == ours { return false; }
+                    let exe = crate::desktop::win32::process_name(pid);
+                    if source.0.is_empty() { exe != "aria-avatar.exe" } else { exe == source.0 }
+                }));
+            }
+        }
+        let peak = meters.as_ref().map_or(0.0, |m| m.peak(|pid| selected_pids.contains(&pid)));
         tracker.push(peak);
         if last_estimate.elapsed() >= Duration::from_millis(500) {
             let took = last_estimate.elapsed();

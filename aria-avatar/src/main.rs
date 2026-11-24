@@ -42,17 +42,26 @@ pub const DEFAULT_H: u32 = 370;
 pub(crate) const FOV_DEGREES: f32 = 28.0;
 
 fn main() {
+    unsafe {
+        // Match the main app's Per-Monitor V2 DPI awareness so physical coordinates sent over the
+        // link align 1:1 with the layered window on HiDPI displays.
+        let _ = windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
+            windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        );
+    }
     let args = link::Args::parse();
 
     // Asset root: the bundled models live next to the exe (`<exe>/assets`) in a release layout,
-    // at `<workspace>/assets` or `<workspace>/aria-avatar/assets` in dev. Absolute model paths
+    // at `<workspace>/assets` in dev. Absolute model paths
     // bypass this entirely.
     let asset_root = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|p| p.join("assets")))
         .into_iter()
         .chain(std::env::current_dir().ok().map(|d| d.join("assets")))
-        .chain(std::env::current_dir().ok().map(|d| d.join("aria-avatar").join("assets")))
+        .chain(Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("assets"),
+        ))
         .find(|p| p.join(behaviors::BUNDLED_MODEL).is_file())
         .unwrap_or_else(|| PathBuf::from("assets"));
 
@@ -75,6 +84,20 @@ fn main() {
         // happens through a plain Win32 layered window. A real Bevy window would create a swap
         // chain that can only be `Opaque`.
         DefaultPlugins
+            .set(bevy::render::RenderPlugin {
+                render_creation: bevy::render::settings::WgpuSettings {
+                    // This is a small desktop overlay, not a game with a large asset pool.
+                    memory_hints: bevy::render::settings::MemoryHints::MemoryUsage,
+                    ..default()
+                }
+                .into(),
+                ..default()
+            })
+            .set(bevy::pbr::PbrPlugin {
+                // The stage uses forward MToon shading and needs no deferred lighting pass.
+                add_default_deferred_lighting_plugin: false,
+                ..default()
+            })
             .set(bevy::asset::AssetPlugin {
                 file_path: asset_root.to_string_lossy().to_string(),
                 // The user may pick a VRM from anywhere on disk (`custom_vrm_path`), which is an
@@ -114,7 +137,7 @@ fn main() {
     .set_runner(run_loop)
     .add_systems(
         Startup,
-        (setup_layered, setup_camera, lighting::spawn_lights).chain(),
+        (setup_layered, setup_camera, lighting::spawn_lights, configure_clusters).chain(),
     )
     .add_systems(
         Update,
@@ -208,6 +231,7 @@ fn apply_dev_overrides(state: &mut behaviors::AvatarState) {
 /// Without `WinitPlugin` nothing else pumps the schedule, so this replaces the window event loop.
 /// Headless rendering has no vsync, which is why the pace is explicit.
 fn run_loop(mut app: App) -> AppExit {
+    use bevy::ecs::system::RunSystemOnce;
     app.finish();
     app.cleanup();
 
@@ -215,7 +239,17 @@ fn run_loop(mut app: App) -> AppExit {
     let scripted = app.world().contains_resource::<demo::Demo>();
     let mut last = std::time::Instant::now();
     loop {
-        app.update();
+        // After the first paused update has hidden the window and disabled the camera, only
+        // drain commands. Running every Bevy/VRM/render schedule while hidden wastes CPU.
+        let paused = !scripted && app.world().resource::<behaviors::AvatarState>().fps == 0;
+        if paused {
+            let _ = app.world_mut().run_system_once(link::pump_link);
+            if app.world().resource::<behaviors::AvatarState>().fps > 0 {
+                app.update();
+            }
+        } else {
+            app.update();
+        }
         if scripted {
             std::thread::sleep(demo::FRAME_PAUSE);
             continue;
@@ -238,6 +272,12 @@ fn run_loop(mut app: App) -> AppExit {
         }
         last = std::time::Instant::now();
     }
+}
+
+fn configure_clusters(mut settings: ResMut<bevy::light::cluster::GlobalClusterSettings>) {
+    // The stage has directional lights. CPU clustering also supports any local prop lights,
+    // without GPU clustering dispatches and their intermediate buffers.
+    settings.gpu_clustering = None;
 }
 
 /// Creates the layered presenter window and the offscreen render target.
@@ -280,6 +320,7 @@ fn setup_camera(mut commands: Commands, target: Option<Res<present::OffscreenTar
         Transform::from_xyz(0.0, 1.15, 2.35).looking_at(Vec3::new(0.0, 1.15, 0.0), Vec3::Y),
         // Ambient light is a per-camera component in this Bevy version; `lighting` sets it.
         AmbientLight::default(),
+        bevy::light::cluster::ClusterConfig::Single,
         behaviors::AvatarCamera,
     ));
     // The camera receives its target in the same system that spawns it: a separate system would

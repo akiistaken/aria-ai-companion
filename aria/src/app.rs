@@ -97,6 +97,8 @@ pub struct App {
     pub bar_activity: Instant,
     /// True while the cursor is over the avatar model (drives click-through).
     pub over_model: bool,
+    /// Last foreground HWND observed by `tick_motion`, to re-assert topmost immediately on focus changes.
+    pub last_foreground: isize,
     /// Window size, stage hole and bar visibility the mascot's hit region was last cut for.
     pub region_key: Option<(i32, i32, Vec<crate::desktop::win32::Rect>)>,
     /// Bubble slot height the window was last laid out for (logical px).
@@ -272,6 +274,7 @@ pub fn init() -> Result<AppHandle, slint::PlatformError> {
         last_discord: Instant::now(),
         bar_activity: Instant::now(),
         over_model: false,
+        last_foreground: 0,
         region_key: None,
         bubble_slot: 0.0,
         timers: Vec::new(),

@@ -362,6 +362,7 @@ pub fn wire_studio(studio: &ControlCenter) {
         let names = crate::desktop::audio::list_audio_devices(false);
         if let Some(name) = names.get(idx.max(0) as usize) {
             config::update(|s| s.output_audio_device = name.clone());
+            crate::voice::tts::reset_output();
             with_app(|app| {
                 if let Some(s) = app.borrow().studio.as_ref() {
                     s.set_output_index(idx);

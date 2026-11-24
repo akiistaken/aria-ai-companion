@@ -18,7 +18,7 @@ use crate::behaviors::AvatarState;
 use crate::link::AvatarLink;
 use crate::present::HitMask;
 
-const DRAG_DEAD_ZONE: f32 = 5.0;
+const DRAG_DEAD_ZONE: f32 = 6.0;
 const SHAKE_STEP: f32 = 12.0;
 const SHAKE_REVERSALS: usize = 5;
 const SHAKE_WINDOW: f32 = 0.85;
@@ -28,7 +28,7 @@ const HEADPAT_WINDOW: f32 = 1.25;
 const HEADPAT_COOLDOWN: f32 = 5.0;
 /// Windows' default double-click time and a small travel tolerance.
 const DOUBLE_CLICK_SECS: f32 = 0.5;
-const DOUBLE_CLICK_SLOP: f32 = 6.0;
+const DOUBLE_CLICK_SLOP: f32 = 12.0;
 /// A press held longer than this is not a click.
 const CLICK_MAX_HOLD: f32 = 0.6;
 /// Hover tolerance around the model's silhouette, in pixels.
@@ -141,8 +141,7 @@ impl GestureState {
             }
         } else if sample.left {
             if let Some((origin, _)) = self.press {
-                let travel = (pos - origin).abs();
-                if !self.dragging && travel.x + travel.y > DRAG_DEAD_ZONE {
+                if !self.dragging && pos.distance(origin) > DRAG_DEAD_ZONE {
                     self.dragging = true;
                     link.send(Event::DragStart);
                 }
@@ -189,7 +188,7 @@ impl GestureState {
     }
 }
 
-/// Feeds the latest cursor sample to the detectors.
+/// Feeds all queued cursor samples (or the stationary cursor when idle) to the gesture detectors.
 pub fn track_pointer(
     time: Res<Time>,
     mut gestures: ResMut<GestureState>,
@@ -197,12 +196,34 @@ pub fn track_pointer(
     mask: Res<HitMask>,
     link: Res<AvatarLink>,
 ) {
-    let Some(sample) = state.pointer.take() else {
-        return;
-    };
+    let dt = time.delta_secs().min(0.25);
+    process_pointer_step(&mut gestures, &mut state, dt, &link, |pos| {
+        mask.hit(pos.x, pos.y, HIT_RADIUS)
+    });
+}
+
+fn process_pointer_step(
+    gestures: &mut GestureState,
+    state: &mut AvatarState,
+    dt: f32,
+    link: &AvatarLink,
+    is_over: impl Fn(Vec2) -> bool,
+) {
     let size = Vec2::new(state.viewport.0 as f32, state.viewport.1 as f32);
-    let over = mask.hit(sample.position.x, sample.position.y, HIT_RADIUS);
-    gestures.update(sample, over, size, time.delta_secs().min(0.1), &link);
+    if let Some(first) = state.pointer_queue.pop_front() {
+        let over = is_over(first.position);
+        gestures.update(first, over, size, dt, link);
+        while let Some(sample) = state.pointer_queue.pop_front() {
+            let over = is_over(sample.position);
+            gestures.update(sample, over, size, 0.0, link);
+        }
+    } else if gestures.have_previous {
+        // Keep the gesture clock advancing while the cursor is stationary so a single click
+        // emits once the double-click window closes and hover follows model motion.
+        let last = gestures.previous;
+        let over = is_over(last.position);
+        gestures.update(last, over, size, dt, link);
+    }
 }
 
 #[cfg(test)]
@@ -274,5 +295,44 @@ mod tests {
         g.update(sample(100.0, 200.0, false), true, size, 0.05, &link);
         g.update(sample(100.0, 200.0, false), true, size, 1.0, &link);
         assert!(!link.drain_sent().iter().any(|e| matches!(e, Event::Click)));
+    }
+
+    #[test]
+    fn batched_double_click_samples_emit_poke_with_small_jitter() {
+        let link = AvatarLink::detached();
+        let mut g = GestureState::default();
+        let mut state = AvatarState::with_model("models/aria_default.vrm".into());
+        // Simulate rapid press/release transitions arriving inside a single 15 FPS frame with
+        // minor cursor jitter between the two clicks.
+        state.pointer_queue.push_back(sample(100.0, 200.0, false));
+        state.pointer_queue.push_back(sample(100.0, 200.0, true));
+        state.pointer_queue.push_back(sample(104.0, 204.0, false));
+        state.pointer_queue.push_back(sample(105.0, 204.0, true));
+        state.pointer_queue.push_back(sample(105.0, 204.0, false));
+        process_pointer_step(&mut g, &mut state, 0.067, &link, |_| true);
+        let sent = link.drain_sent();
+        assert!(sent.iter().any(|e| matches!(e, Event::Poke)));
+        assert!(!sent.iter().any(|e| matches!(e, Event::DragStart)));
+        assert!(!sent.iter().any(|e| matches!(e, Event::Click)));
+    }
+
+    #[test]
+    fn stationary_cursor_emits_single_click_after_window() {
+        let link = AvatarLink::detached();
+        let mut g = GestureState::default();
+        let mut state = AvatarState::with_model("models/aria_default.vrm".into());
+        state.pointer_queue.push_back(sample(100.0, 200.0, false));
+        state.pointer_queue.push_back(sample(100.0, 200.0, true));
+        state.pointer_queue.push_back(sample(100.0, 200.0, false));
+        process_pointer_step(&mut g, &mut state, 0.05, &link, |_| true);
+        assert!(!link.drain_sent().iter().any(|e| matches!(e, Event::Click)));
+
+        for _ in 0..8 {
+            process_pointer_step(&mut g, &mut state, 0.07, &link, |_| true);
+        }
+        assert_eq!(
+            link.drain_sent().iter().filter(|e| matches!(e, Event::Click)).count(),
+            1
+        );
     }
 }

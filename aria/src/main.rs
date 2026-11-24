@@ -14,6 +14,7 @@ mod avatar_link;
 mod config;
 mod desktop;
 mod discord;
+mod diagnostics;
 mod logger;
 mod memory;
 mod persona;
@@ -37,6 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_err()
     {
         log::debug!("a rustls crypto provider was already installed");
+    }
+
+    if std::env::args().any(|arg| arg == "--diagnose") {
+        diagnostics::run();
+        return Ok(());
     }
 
     let pid_file = config::data_dir().join("aria.pid");

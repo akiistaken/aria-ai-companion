@@ -205,6 +205,14 @@ fn strip_notification_count(title: &str) -> &str {
 
 static CACHE: Mutex<Option<(Instant, NowPlaying)>> = Mutex::new(None);
 
+/// Presence must not wait for WinRT metadata or audio device probing. The music worker
+/// updates this snapshot independently; an old result cannot keep media presence active.
+pub fn latest() -> NowPlaying {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        .filter(|(at, _)| at.elapsed() < Duration::from_secs(5))
+        .map(|(_, value)| value.clone()).unwrap_or_default()
+}
+
 /// Bounds the entire WinRT query, including synchronous COM calls made before an async
 /// operation exists. At most one query can be outstanding, even if Windows never returns it.
 #[derive(Default)]

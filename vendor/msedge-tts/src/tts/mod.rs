@@ -211,6 +211,14 @@ fn websocket_connect() -> Result<tungstenite::WebSocket<RustlsStream<std::net::T
 
     let stream = std::net::TcpStream::connect((host.as_str(), 443)).map_err(Error::Io)?;
     stream.set_nodelay(true).map_err(Error::Io)?;
+    // A missing turn.end or stalled TLS handshake must not leave the application's speech
+    // worker waiting indefinitely. These limits apply to this blocking connection only.
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .map_err(Error::Io)?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .map_err(Error::Io)?;
 
     let config = ClientConfig::with_platform_verifier()
         .map_err(|e| Error::Tls(TlsError::Rustls(Box::new(e))))?;

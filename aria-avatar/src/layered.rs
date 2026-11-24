@@ -22,6 +22,7 @@
 
 use std::sync::atomic::{AtomicI64, AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
@@ -98,7 +99,6 @@ fn wanted_pos() -> Option<(i32, i32)> {
 
 /// Messages the renderer sends to the window thread.
 enum Present {
-    Frame { rgba: Vec<u8>, width: u32, height: u32 },
     Show,
     Hide,
     Stop,
@@ -107,7 +107,10 @@ enum Present {
 /// Handle used by the renderer to publish frames.
 pub struct LayeredSurface {
     tx: Sender<Present>,
+    frame: Arc<Mutex<Option<Frame>>>,
 }
+
+type Frame = (Vec<u8>, u32, u32);
 
 fn to_wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -129,12 +132,14 @@ impl LayeredSurface {
     /// Starts the window thread. The HWND appears in [`HWND_OUT`] shortly after.
     pub fn spawn(width: u32, height: u32, title: &str) -> Option<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
+        let frame = Arc::new(Mutex::new(None));
+        let window_frame = frame.clone();
         let title = title.to_string();
         std::thread::Builder::new()
             .name("avatar-window".into())
-            .spawn(move || window_thread(width as i32, height as i32, &title, rx))
+            .spawn(move || window_thread(width as i32, height as i32, &title, rx, window_frame))
             .ok()?;
-        Some(Self { tx })
+        Some(Self { tx, frame })
     }
 
     /// Publishes one straight-alpha RGBA8 frame. Ownership moves to the window thread, so the
@@ -143,8 +148,11 @@ impl LayeredSurface {
         if rgba.len() < (width * height * 4) as usize || width == 0 || height == 0 {
             return;
         }
-        let _ = self.tx.send(Present::Frame { rgba, width, height });
-        wake();
+        // A stalled window thread retains only the newest frame, never an unbounded queue.
+        let mut frame = self.frame.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = frame.replace((rgba, width, height)).is_some();
+        drop(frame);
+        if !pending { wake(); }
     }
 
     pub fn show(&mut self) {
@@ -226,7 +234,7 @@ impl Dib {
     }
 }
 
-fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
+fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>, frame: Arc<Mutex<Option<Frame>>>) {
     let Ok(module) = (unsafe { GetModuleHandleW(None) }) else {
         log::error!("layered: no module handle");
         return;
@@ -299,11 +307,11 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
 
     'outer: loop {
         // Sleep until a window message arrives (including the app's synchronous moves of this
-        // window, and `WM_WAKE` from the renderer) or 15 ms pass. Waiting on the message queue
+        // window, and `WM_WAKE` from the renderer). Waiting on the message queue
         // rather than the channel matters: the app now moves this window itself, and each of
         // those moves waits for this thread to answer `WM_WINDOWPOSCHANGING`.
         unsafe {
-            MsgWaitForMultipleObjects(None, false, 15, QS_ALLINPUT);
+            MsgWaitForMultipleObjects(None, false, u32::MAX, QS_ALLINPUT);
         }
 
         // Drain the window's messages first: this queue must stay serviced for
@@ -359,10 +367,8 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
         }
 
         // Handle everything queued. Only the newest frame is worth drawing.
-        let mut latest: Option<(Vec<u8>, u32, u32)> = None;
         loop {
             match rx.try_recv() {
-                Ok(Present::Frame { rgba, width, height }) => latest = Some((rgba, width, height)),
                 Ok(Present::Show) => {
                     hidden = false;
                     if visible {
@@ -373,7 +379,7 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
                 }
                 Ok(Present::Hide) => unsafe {
                     hidden = true;
-                    latest = None;
+                    *frame.lock().unwrap_or_else(|e| e.into_inner()) = None;
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 },
                 Ok(Present::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -383,6 +389,7 @@ fn window_thread(width: i32, height: i32, title: &str, rx: Receiver<Present>) {
             }
         }
 
+        let latest = frame.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some((rgba, w, h)) = latest {
             {
                 if hidden {

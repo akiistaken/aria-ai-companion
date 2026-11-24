@@ -327,7 +327,10 @@ pub fn pump_link(
                 right,
                 middle,
             } => {
-                state.pointer = Some(crate::input::PointerSample {
+                if state.pointer_queue.len() >= 64 {
+                    state.pointer_queue.pop_front();
+                }
+                state.pointer_queue.push_back(crate::input::PointerSample {
                     position: Vec2::new(x, y),
                     left: pressed,
                     right,

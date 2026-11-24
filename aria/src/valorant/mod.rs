@@ -110,6 +110,17 @@ impl Default for State {
 }
 
 impl State {
+    fn capture_blocker(&self, settings: &crate::config::Settings, ai_available: bool) -> Option<&'static str> {
+        if !self.active { return Some("Waiting for Valorant to start"); }
+        if !self.focused { return Some("Valorant is open in the background; return to the game to read stats"); }
+        if self.account.is_none() { return Some("Waiting for the signed-in Riot account before reading stats"); }
+        if !settings.automatic_game_copilot_enabled && !self.refresh_requested {
+            return Some("Game copilot is off; enable it for automatic stats or use Refresh");
+        }
+        if !ai_available { return Some("Configure an AI endpoint and API key to read visible stats"); }
+        None
+    }
+
     fn change_account(&mut self, next: Option<Account>) -> bool {
         let changed = match (&self.account, &next) {
             (Some(a), Some(b)) => !a.same_player(b),
@@ -281,14 +292,12 @@ pub struct CaptureTicket {
 
 pub fn begin_capture() -> Option<CaptureTicket> {
     let settings = crate::config::get();
-    if !settings.valorant_enabled
-        || !settings.automatic_game_copilot_enabled
-        || !crate::ai::client::available()
-    {
+    let mut state = store().lock().unwrap_or_else(|e| e.into_inner());
+    if !settings.valorant_enabled || state.capture.is_some() {
         return None;
     }
-    let mut state = store().lock().unwrap_or_else(|e| e.into_inner());
-    if !state.active || !state.focused || state.capture.is_some() {
+    if let Some(message) = state.capture_blocker(&settings, crate::ai::client::available()) {
+        state.capture_status = message.into();
         return None;
     }
     let delay = if state.refresh_requested {
@@ -533,6 +542,20 @@ mod tests {
             outcome: None,
             stats: Stats::default(),
         }
+    }
+
+    #[test]
+    fn manual_refresh_reads_stats_when_automatic_copilot_is_off() {
+        let settings = crate::config::Settings { automatic_game_copilot_enabled: false, ..Default::default() };
+        let mut state = State { active: true, focused: true, account: Some(account("one#tag")), ..Default::default() };
+        assert!(state.capture_blocker(&settings, true).unwrap().contains("copilot is off"));
+        state.refresh_requested = true;
+        assert!(state.capture_blocker(&settings, true).is_none());
+        assert!(state.capture_blocker(&settings, false).unwrap().contains("API key"));
+        state.focused = false;
+        assert!(state.capture_blocker(&settings, true).unwrap().contains("background"));
+        state.active = false;
+        assert!(state.capture_blocker(&settings, true).unwrap().contains("start"));
     }
 
     #[test]

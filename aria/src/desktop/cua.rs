@@ -5,11 +5,8 @@
 //! daemon runs at sign-in), this module starts `cua-driver mcp` as a child process and speaks
 //! MCP's JSON-RPC over its stdio, one request at a time.
 //!
-//! It is used two ways:
-//! - a curated set of its tools is offered to the model (see [`model_tools`]), replacing the
-//!   pixel-guessing mouse and keyboard tools;
-//! - [`windows`] feeds presence and game detection with every on-screen window, its owning exe,
-//!   bounds and z-order.
+//! A curated set of its tools is offered to the model (see [`model_tools`]), replacing the
+//! pixel-guessing mouse and keyboard tools. Presence and game detection use native Win32 APIs.
 //!
 //! Everything degrades: no driver, a dead daemon or a timeout all read as "unavailable", and
 //! callers fall back to plain Win32.
@@ -20,7 +17,6 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -292,7 +288,6 @@ fn short_description(full: &str) -> String {
 pub struct CallResult {
     pub ok: bool,
     pub text: String,
-    pub structured: Option<Value>,
 }
 
 /// Calls a driver tool by its own (unprefixed) name.
@@ -315,66 +310,12 @@ pub fn call(name: &str, arguments: Value) -> Result<CallResult, String> {
     Ok(CallResult {
         ok: !result.get("isError").and_then(Value::as_bool).unwrap_or(false),
         text,
-        structured: result.get("structuredContent").cloned(),
     })
-}
-
-// ---------------------------------------------------------------------------------- windows
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct Bounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct Window {
-    pub window_id: i64,
-    pub pid: u32,
-    pub app_name: String,
-    pub title: String,
-    pub bounds: Bounds,
-    pub z_index: Option<i64>,
-    pub is_on_screen: bool,
-    pub minimized: bool,
-}
-
-#[derive(Deserialize)]
-struct WindowList {
-    #[serde(default)]
-    windows: Vec<Window>,
-}
-
-/// Every on-screen window, front-most first. `None` when the driver is not available.
-pub fn windows() -> Option<Vec<Window>> {
-    let result = call("list_windows", json!({ "on_screen_only": true })).ok()?;
-    let mut list = serde_json::from_value::<WindowList>(result.structured?).ok()?.windows;
-    list.retain(|w| w.is_on_screen && !w.minimized);
-    list.sort_by_key(|w| std::cmp::Reverse(w.z_index.unwrap_or(i64::MIN)));
-    Some(list)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn window_lists_decode_from_structured_content() {
-        let raw = json!({ "windows": [
-            { "app_name": "Spotify.exe", "pid": 7, "title": "Coolio - Gangsta's Paradise", "window_id": 1,
-              "bounds": { "x": 0, "y": 0, "width": 800, "height": 600 }, "z_index": 3,
-              "is_on_screen": true, "minimized": false, "layer": 0 },
-            { "app_name": "x.exe", "pid": 8, "title": "", "window_id": 2, "z_index": null }
-        ]});
-        let list: WindowList = serde_json::from_value(raw).unwrap();
-        assert_eq!(list.windows.len(), 2);
-        assert_eq!(list.windows[0].bounds.width, 800);
-        assert_eq!(list.windows[1].z_index, None);
-    }
 
     #[test]
     fn schemas_keep_structure_but_lose_prose() {

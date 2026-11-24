@@ -58,13 +58,18 @@ const NOT_GAMES: &[&str] = &[
     "potplayermini64.exe", "explorer.exe", "applicationframehost.exe", "powerpnt.exe", "obs64.exe",
     "textinputhost.exe", "nvidia overlay.exe", "searchhost.exe", "lockapp.exe", "shellexperiencehost.exe",
     "steam.exe", "steamwebhelper.exe", "epicgameslauncher.exe", "aria.exe", "aria-avatar.exe", "cua-driver.exe",
-    "riotclientservices.exe", "riotclientux.exe", "riotclientuxrender.exe", "eadesktop.exe", "ealauncher.exe",
+    "riot client.exe", "riotclientservices.exe", "riotclientux.exe", "riotclientuxrender.exe", "riotclientcrashhandler.exe", "eadesktop.exe", "ealauncher.exe",
     "eabackgroundservice.exe", "origin.exe", "battle.net.exe", "agent.exe", "ubisoftconnect.exe", "upc.exe",
     "galaxyclient.exe", "hoyoplay.exe", "launcher.exe", "easyanticheat.exe", "easyanticheat_eos.exe",
     "beservice.exe", "crashreportclient.exe", "crashpad_handler.exe", "werfault.exe", "uninstall.exe",
     "discord.exe", "spotify.exe", "code.exe", "notepad.exe", "notepad++.exe", "windowsterminal.exe",
     "powershell.exe", "pwsh.exe", "cmd.exe", "mstsc.exe", "winword.exe", "excel.exe", "acrord32.exe",
     "unity.exe", "unrealeditor.exe", "obs.exe", "devenv.exe", "mmc.exe", "taskmgr.exe", "systemsettings.exe",
+    "snippingtool.exe", "screensketch.exe", "screenclippinghost.exe", "photos.exe",
+    "antigravity.exe", "cursor.exe", "windsurf.exe", "zed.exe", "sublime_text.exe",
+    "idea64.exe", "pycharm64.exe", "clion64.exe", "rider64.exe", "webstorm64.exe",
+    "arc.exe", "zen.exe", "chromium.exe", "slack.exe", "teams.exe", "ms-teams.exe", "zoom.exe",
+    "obsidian.exe", "notion.exe", "figma.exe", "blender.exe", "wt.exe", "alacritty.exe", "wezterm-gui.exe",
 ];
 
 /// The keyword a title (or exe name) contains, if it names a known game.
@@ -147,9 +152,6 @@ fn classify_with_catalog(fg: &Foreground, catalog: &[game_catalog::InstalledGame
     if fg.game_engine || fg.class.eq_ignore_ascii_case("UnityWndClass") || fg.class.eq_ignore_ascii_case("UnrealWindow")
         || (exe.ends_with("-win64-shipping.exe") && path.contains(r"\binaries\win64\")) {
         return Some(Game { name: pretty(&exe), signal: "game engine" });
-    }
-    if fg.fullscreen && fg.graphics && !fg.title.trim().is_empty() {
-        return Some(Game { name: pretty(&fg.exe), signal: "fullscreen" });
     }
     None
 }
@@ -240,11 +242,15 @@ fn select_foreground(active: Option<&win32::WindowInfo>, windows: &[win32::Windo
 
 /// Local sample only. Called on its own worker every two seconds; never calls Cua or AI.
 pub fn refresh() -> Activity {
+    log::debug!("presence: checking desktop");
     let locked = win32::session_locked();
+    log::debug!("presence: reading foreground");
     let active = win32::active_window();
+    log::debug!("presence: enumerating windows");
     let windows = win32::enum_windows(false);
+    log::debug!("presence: classifying {} windows", windows.len());
     let catalog = game_catalog::installed();
-    let playing = super::media::now_playing();
+    let playing = super::media::latest();
     // Native queries must not hold the snapshot lock: the UI reads it while the worker probes.
     let mut tracker = TRACKER.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
     poll_controllers(&mut tracker);
@@ -269,7 +275,7 @@ pub fn refresh() -> Activity {
     let foreground_game = foreground.as_ref().and_then(|fg| classify_with_catalog(fg, &catalog));
     let mut running_games = Vec::new();
     // Only real app windows: no background launchers/services inferred as gameplay.
-    for win in windows.iter().filter(|w| !overlay(w) && !w.title.trim().is_empty()) {
+    for win in windows.iter().filter(|w| !overlay(w) && (!w.title.trim().is_empty() || GAME_EXECUTABLES.iter().any(|(exe, _)| *exe == w.exe))) {
         let mut fg = as_foreground(win);
         if let Some((_, _, engine, graphics)) = tracker.modules.get(&fg.pid).filter(|(_, path, _, _)| path == &fg.path) {
             fg.game_engine = *engine;
@@ -279,13 +285,24 @@ pub fn refresh() -> Activity {
             if !running_games.iter().any(|g: &Game| g.name == game.name) { running_games.push(game); }
         }
     }
+    // Protected games may have no enumerable visible window while loading or minimized.
+    // Explicit game executable identities still establish a running session, never focus.
+    for exe in win32::running_process_names().values() {
+        if let Some((_, name)) = GAME_EXECUTABLES.iter().find(|(known, _)| known == exe) {
+            if !running_games.iter().any(|game: &Game| game.name == *name) {
+                running_games.push(Game { name: (*name).into(), signal: "running executable" });
+            }
+        }
+    }
     if let Some(game) = &foreground_game {
         if !running_games.iter().any(|g| g.name == game.name) { running_games.push(game.clone()); }
     }
+    running_games.sort_by(|a, b| a.name.cmp(&b.name));
     let watching_media = foreground.as_ref().is_some_and(|fg| fg.fullscreen && playing.is_playing && fg.exe.eq_ignore_ascii_case(&playing.exe));
     let activity = Activity { foreground, foreground_game, running_games, idle_seconds: idle, locked,
         watching_media, media: if playing.is_playing { playing.label() } else { String::new() }, sampled: true };
-    if activity.foreground_game != tracker.latest.foreground_game || activity.locked != tracker.latest.locked {
+    if !tracker.latest.sampled || activity.foreground_game != tracker.latest.foreground_game
+        || activity.running_games != tracker.latest.running_games || activity.locked != tracker.latest.locked {
         log::info!("PC activity: {}", activity.description());
     }
     tracker.latest = activity.clone();
@@ -342,13 +359,22 @@ mod tests {
     }
 
     #[test]
-    fn games_are_found_by_library_title_and_fullscreen() {
+    fn games_are_found_by_library_executable_and_title() {
         let steam = fg("Hollow Knight", "hollow_knight.exe", r"d:\steam\steamapps\common\hollow knight\hollow_knight.exe", false);
         assert_eq!(classify(&steam).map(|g| g.signal), Some("library"));
         let valorant = fg("VALORANT  ", "valorant-win64-shipping.exe", "", false);
         assert_eq!(classify(&valorant), Some(Game { name: "Valorant".into(), signal: "executable" }));
-        let unknown = fg("Indie Thing", "indie.exe", r"c:\games\indie.exe", true);
-        assert_eq!(classify(&unknown).map(|g| g.signal), Some("fullscreen"));
+        let by_title = fg("Elden Ring", "custom_client.exe", r"c:\custom\client.exe", false);
+        assert_eq!(classify(&by_title), Some(Game { name: "Elden Ring".into(), signal: "title" }));
+    }
+
+    #[test]
+    fn gpu_accelerated_non_game_fullscreen_apps_are_not_games() {
+        let mut viewer = fg("3D Viewport", "viewer3d.exe", r"c:\tools\viewer3d.exe", true);
+        viewer.graphics = true;
+        assert_eq!(classify(&viewer), None, "GPU usage and fullscreen alone must not trigger game detection");
+        let ide = fg("Valorant - Workspace", "antigravity.exe", r"c:\programs\antigravity.exe", true);
+        assert_eq!(classify(&ide), None, "excluded GPU apps must never trigger even when a title matches");
     }
 
     #[test]
@@ -382,13 +408,20 @@ mod tests {
 
     #[test]
     fn launchers_editors_and_helpers_are_excluded_even_in_game_libraries() {
-        for exe in ["RiotClientServices.exe", "EpicGamesLauncher.exe", "EADesktop.exe",
+        for exe in ["Riot Client.exe", "RiotClientServices.exe", "RiotClientCrashHandler.exe", "EpicGamesLauncher.exe", "EADesktop.exe",
             "EasyAntiCheat_EOS.exe", "CrashReportClient.exe", "Unity.exe", "UnrealEditor.exe"] {
             assert!(classify(&fg("VALORANT / Apex Legends", exe, r"D:\Steam\steamapps\common\Game\helper.exe", true)).is_none(), "{exe}");
         }
         let mut app = fg("A presentation", "presentation.exe", "", true);
         app.graphics = false;
         assert_eq!(classify(&app), None, "covering a monitor alone does not prove gameplay");
+    }
+
+    #[test]
+    fn riot_electron_launcher_is_excluded_from_riot_install_library() {
+        assert!(classify(&fg("Riot Client", "Riot Client.exe",
+            r"D:\Riot Games\Riot Client\RiotClientElectron\Riot Client.exe", false)).is_none());
+        assert_eq!(classify(&fg("", "VALORANT-Win64-Shipping.exe", "", false)).unwrap().name, "Valorant");
     }
 
     #[test]

@@ -52,6 +52,10 @@ pub(crate) fn start_timers(app: &AppHandle) {
     }
     {
         let app = app.clone();
+        own_timer(app.clone(), Duration::from_secs(1), move || tick_clipboard(&app));
+    }
+    {
+        let app = app.clone();
         // Re-assert the body layout so the three windows follow the Slint position.
         own_timer(app.clone(), Duration::from_millis(400), move || {
             layout_windows(&app)
@@ -72,13 +76,15 @@ pub(crate) fn start_timers(app: &AppHandle) {
             let _ = try_with_app_mut(|_| apply_render_policy(&app));
         });
     }
-    own_timer(app.clone(), Duration::from_secs(90), || {
-        crate::desktop::win32::trim_working_set();
-    });
 }
 
 /// The body tick: physics, where she looks, the cursor for the gestures, and voice.
 pub(crate) fn tick_motion(app: &AppHandle) {
+    let fg = crate::desktop::win32::foreground_hwnd();
+    if fg != app.borrow().last_foreground {
+        app.borrow_mut().last_foreground = fg;
+        enforce_topmost(app);
+    }
     let dt = {
         let mut a = app.borrow_mut();
         let now = Instant::now();
@@ -123,9 +129,7 @@ fn shown_emotion(emotion: &str, moving: bool) -> &str {
     }
 }
 
-/// Render policy, re-evaluated every second: pause while the session is locked or the mascot is
-/// not on screen, 10 FPS while a game has the foreground, 30 otherwise.
-pub(crate) fn apply_render_policy(app: &AppHandle) {
+fn enforce_topmost(app: &AppHandle) {
     // Keep the mascot window (bubble + chat bar) in the topmost band. The avatar window is owned
     // by it and sits in that band too; if the mascot ever dropped out, other apps would cover the
     // chat chrome while the avatar stayed on top, and the two would look unrelated.
@@ -135,6 +139,12 @@ pub(crate) fn apply_render_policy(app: &AppHandle) {
         }
     }
     crate::desktop::win32::ensure_topmost(app.borrow().stage.hwnd() as isize);
+}
+
+/// Render policy, re-evaluated every 250 ms: pause while locked or hidden, 10 FPS in a game,
+/// otherwise a 30 FPS ceiling (the renderer drops to 15 FPS at rest).
+pub(crate) fn apply_render_policy(app: &AppHandle) {
+    enforce_topmost(app);
     let hidden = !app.borrow().ui.window().is_visible() || crate::desktop::win32::session_locked();
     let fps = if hidden {
         0
@@ -252,7 +262,8 @@ pub(crate) fn apply_proactive(
 pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::presence::Game>) {
     let settings = config::get();
     if app.borrow().foreground_game != game {
-        app.borrow_mut().last_copilot_vision = Instant::now();
+        // Let the first observation arrive soon after launch, then use the normal cadence.
+        app.borrow_mut().last_copilot_vision = Instant::now() - Duration::from_secs(73);
     }
     app.borrow_mut().foreground_game = game.clone();
     if app.borrow().dragging { return; }
@@ -288,12 +299,9 @@ pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::pre
         _ => {}
     }
     if let Some(game) = game.filter(|_| settings.automatic_game_copilot_enabled) {
-        // Valorant uses structured own-player observations and results-screen recaps.
-        // Its live frames do not go through the generic game-commentary prompt.
-        if game.name == "Valorant" { return; }
         let a = app.borrow();
         let due = a.last_copilot_vision.elapsed().as_secs() >= 85 && !a.busy && !a.dragging && !a.reaction_pending
-            && !crate::voice::is_recording() && !crate::voice::is_speaking() && crate::ai::client::available();
+            && !crate::voice::is_recording() && !crate::voice::is_speaking();
         drop(a);
         if due {
             app.borrow_mut().last_copilot_vision = Instant::now();
@@ -301,7 +309,13 @@ pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::pre
             let started = Instant::now();
             app.borrow_mut().reaction_pending = true;
             std::thread::spawn(move || {
-                let reply = crate::ai::tasks::game_observation(&game.name);
+                let reply = crate::ai::tasks::game_observation(&game.name).unwrap_or_else(|| {
+                    log::info!("{} copilot: using encouragement because visual analysis is unavailable", game.name);
+                    let lines = ["Take a breath between rounds. You've got this.",
+                        "Stay comfortable, and take a stretch break when you need one.",
+                        "I'm here cheering you on. Keep enjoying the game."];
+                    (lines[rand::random_range(0..lines.len())].into(), "happy".into())
+                });
                 post(move |app| {
                     app.borrow_mut().reaction_pending = false;
                     let a = app.borrow();
@@ -311,9 +325,8 @@ pub(crate) fn apply_game_state(app: &AppHandle, game: Option<crate::desktop::pre
                         && !crate::voice::is_recording() && !crate::voice::is_speaking();
                     drop(a);
                     if current {
-                        if let Some((text, emotion)) = reply {
-                            say(app, &text, &emotion, vec![format!("Game observation: {}", game.name)], true);
-                        }
+                        let (text, emotion) = reply;
+                        say(app, &text, &emotion, vec![format!("Game copilot: {}", game.name)], true);
                     }
                 });
             });
@@ -490,13 +503,20 @@ fn apply_idle_event(app: &AppHandle, event: crate::ai::tasks::IdleEvent) {
 }
 
 pub(crate) fn tick_ui(app: &AppHandle) {
-    let (full, typed, shown) = {
+    let typing = {
         let a = app.borrow();
-        (a.full_bubble_text.clone(), a.typed, a.ui.get_bubble_shown())
+        if a.ui.get_bubble_shown() {
+            let count = a.full_bubble_text.chars().count();
+            (a.typed < count).then(|| {
+                let next = (a.typed + 3).min(count);
+                let visible: String = a.full_bubble_text.chars().take(next).collect();
+                (next, visible)
+            })
+        } else {
+            None
+        }
     };
-    if shown && typed < full.chars().count() {
-        let next = (typed + 3).min(full.chars().count());
-        let visible: String = full.chars().take(next).collect();
+    if let Some((next, visible)) = typing {
         app.borrow().ui.set_bubble_text(visible.into());
         app.borrow_mut().typed = next;
         // The bubble wraps onto new lines as it types; grow the window with it.
@@ -523,7 +543,6 @@ pub(crate) fn tick_ui(app: &AppHandle) {
         app.borrow_mut().duplex_pending = false;
     }
     tick_hover(app);
-    tick_clipboard(app);
     apply_persona(app);
 }
 

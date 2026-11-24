@@ -131,7 +131,7 @@ pub enum Command {
         zoom: f32,
         y_offset: f32,
     },
-    /// 30 normal, 10 in game mode, 0 = paused (nothing rendered, window hidden).
+    /// Frame-rate ceiling: 30 normal (15 at rest), 10 in game mode, 0 = paused.
     SetFps { fps: u32 },
     /// Where the avatar window goes, in physical screen pixels, and the size it draws at (a
     /// layered window shows its bitmap 1:1). The renderer applies the position only until it has

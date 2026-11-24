@@ -45,6 +45,11 @@ impl MeterSet {
         self.opened.elapsed()
     }
 
+    /// Session owners, used to resolve the music source once per enumeration, not per sample.
+    pub fn process_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.meters.iter().map(|(pid, _)| *pid)
+    }
+
     /// The loudest peak right now among sessions whose pid passes `keep` (system sounds, pid 0,
     /// are always skipped).
     pub fn peak(&self, keep: impl Fn(u32) -> bool) -> f32 {

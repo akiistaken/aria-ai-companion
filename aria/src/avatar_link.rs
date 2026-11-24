@@ -42,7 +42,7 @@ pub struct AvatarLink {
     last: Arc<Mutex<LastState>>,
 }
 
-/// Last values pushed, so the 30 Hz motion tick only writes to the socket when something moved.
+/// Last values pushed, so the 60 Hz motion tick only writes to the socket when something moved.
 #[derive(Default, Clone, PartialEq)]
 struct LastState {
     emotion: String,
@@ -267,7 +267,7 @@ impl AvatarLink {
         });
     }
 
-    /// 30 normally, 10 in game mode, 0 to pause rendering entirely. Only sent on change.
+    /// 30 FPS ceiling (15 at rest), 10 in game mode, 0 to pause. Only sent on change.
     pub fn set_fps(&self, fps: u32) {
         if !self.changed(|last| last.fps.replace(fps) != Some(fps)) {
             return;

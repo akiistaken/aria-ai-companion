@@ -87,6 +87,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev-setup.ps1
 
 ### Configuration
 
+Aria now renders at 15 FPS at rest, up to 30 during activity, and pauses while hidden. The measured
+idle app used about 1.6% CPU, 423 MiB RAM and 1.5% GPU on the development machine. See
+[resource measurements and reproduction steps](docs/performance.md) for the setup and limits.
+
 No keys are committed. Runtime state lives in `%APPDATA%\Aria\settings.json`, created on first run.
 [settings.example.json](settings.example.json) shows the shape; the important fields:
 
@@ -121,7 +125,8 @@ opens the quick dial.
 cargo test --workspace
 ```
 
-156 tests pass by default (app, renderer and protocol). A few live tests need a real API key and are
+191 tests pass by default (app, renderer and protocol). Six live tests are ignored by default; some
+need a real API key and are
 excluded from the default run:
 
 ```powershell
@@ -144,6 +149,9 @@ $env:ARIA_AVATAR_LIGHTING='sunset'; $env:ARIA_AVATAR_FRAMING='full'
 to see whether music detection works on your machine.
 
 **Presence & gaming** shows the current app, game and detection evidence in the Control Center.
+Known running game executables also keep background sessions visible while their windows are
+loading or unavailable. Game Copilot gives encouragement in Valorant as well as other games,
+with local fallback lines when visual analysis is unavailable.
 Aria checks native Windows activity every two seconds, including Valorant and Apex executable names,
 Steam/Epic manifests on custom drives, game libraries and game engines. Launchers, browsers and
 editors are excluded. Detection continues while she speaks or waits for AI; brief Alt-Tab changes
@@ -155,6 +163,12 @@ over your preferred avatar size. Copilot screenshots use the game’s monitor. L
 fallback lines when AI is unavailable. Both avatar and chat windows recover their topmost position
 without taking keyboard focus. Use borderless/windowed game mode for desktop overlays; exclusive
 fullscreen games can bypass Windows desktop composition.
+
+To diagnose voice and game integration using the installed app's native code, run
+`target\debug\aria.exe --diagnose` (or the release binary). This plays a short voice test and
+writes `%APPDATA%\Aria\logs\diagnostics.json`, including game evidence, Riot discovery, audio
+levels and output mute/volume state. It does not launch the avatar or change settings.
+TTS uses the output selected in Control Center and reconnects after output-device changes.
 
 **Valorant awareness** is available under Control Center → **Presence & gaming**. Enable it and
 leave the test Riot ID blank: Aria discovers the signed-in account from the local Riot Client,

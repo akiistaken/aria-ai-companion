@@ -145,14 +145,19 @@ fn json_body(text: &str) -> &str {
 /// A brief game observation with a fresh screenshot. Uses the short background timeout and
 /// never writes an automatic screenshot to the conversation history.
 pub fn game_observation(game: &str) -> Option<(String, String)> {
+    if !client::available() { return None; }
+    let hwnd = crate::desktop::presence::foreground()?.hwnd;
+    if crate::desktop::win32::active_window()?.hwnd != hwnd { return None; }
     let b64 = crate::desktop::win32::capture_screen_jpeg_b64(1280)?;
+    if crate::desktop::win32::active_window()?.hwnd != hwnd { return None; }
     let instruction = format!(
         "You are Aria, the game copilot for {game}. Observe this current screenshot and ignore desktop companion overlays. \
          Give one short observation grounded in visible gameplay, or simple encouragement if the screen is unclear. \
          Do not invent enemies, health, scores, wins or tense moments. Start with an emotion tag and keep it under 25 words.");
     let mut messages = in_character(instruction.clone());
     *messages.last_mut()? = prompt::user_with_image(instruction, "image/jpeg", &b64);
-    let text = ask(messages, false, true).map_err(|e| log::debug!("game observation unavailable: {e}")).ok()?;
+    let text = ask(messages, false, true).map_err(|e| log::warn!("game observation unavailable: {e}")).ok()?;
+    if crate::desktop::win32::active_window()?.hwnd != hwnd { return None; }
     let tagged = prompt::read_tags(&text, "talking");
     (!tagged.text.trim().is_empty()).then_some((tagged.text, tagged.emotion))
 }

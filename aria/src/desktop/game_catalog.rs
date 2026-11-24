@@ -22,13 +22,23 @@ pub(super) fn find<'a>(games: &'a [InstalledGame], path: &str) -> Option<&'a str
 
 pub(super) fn installed() -> Vec<InstalledGame> {
     static CACHE: Mutex<Option<(Instant, Vec<InstalledGame>)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, games)) = cache.as_ref() {
-        if at.elapsed() < Duration::from_secs(120) { return games.clone(); }
+    static IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let cached = CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let stale = cached.as_ref().is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(120));
+    if stale && !IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // Custom libraries can live on sleeping or unavailable drives. Discovery runs
+        // separately so it cannot stop executable-based game detection or Riot polling.
+        std::thread::spawn(|| {
+            struct Release;
+            impl Drop for Release {
+                fn drop(&mut self) { IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst); }
+            }
+            let _release = Release;
+            let games = discover();
+            *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), games));
+        });
     }
-    let games = discover();
-    *cache = Some((Instant::now(), games.clone()));
-    games
+    cached.map(|(_, games)| games).unwrap_or_default()
 }
 
 // VDF values are quoted strings; only unescape quotes/backslashes, preserving Windows paths.

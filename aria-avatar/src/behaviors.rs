@@ -1,6 +1,8 @@
 //! Avatar behaviour: what the app has asked for, the model's lifecycle, and the system that runs
 //! the animator and writes its result into the scene.
 
+use std::collections::VecDeque;
+
 use bevy::prelude::*;
 use bevy_vrm1::prelude::{Initialized, LookAt, VrmHandle};
 
@@ -50,8 +52,9 @@ pub struct AvatarState {
     pub fps: u32,
     /// Window size in physical pixels.
     pub viewport: (u32, u32),
-    /// Latest cursor sample, consumed by the gesture detectors.
-    pub pointer: Option<crate::input::PointerSample>,
+    /// Queued cursor samples, drained in order by the gesture detectors so rapid clicks between
+    /// slower render frames do not overwrite each other.
+    pub pointer_queue: VecDeque<crate::input::PointerSample>,
     pub headpat_active: f32,
 
     // ---- Derived each frame ----
@@ -96,7 +99,7 @@ impl Default for AvatarState {
             y_offset: 0.0,
             fps: 30,
             viewport: (crate::DEFAULT_W, crate::DEFAULT_H),
-            pointer: None,
+            pointer_queue: VecDeque::new(),
             headpat_active: 0.0,
             smoothed_look: Vec2::ZERO,
             busy: false,
@@ -121,15 +124,15 @@ impl AvatarState {
         }
     }
 
-    /// 30 FPS at rest and 60 while something is moving: walking, dancing, talking, a gesture
-    /// blending in. The app's requested rate is the base; the boost only applies at the normal
-    /// (30+) rate, never in game mode.
+    /// 15 FPS at rest, up to the requested ceiling while walking, dancing, talking or gesturing.
+    /// A reduced rate (game mode) and pause are always respected; activity never forces 60 FPS.
     pub fn effective_fps(&self) -> u32 {
-        let busy = self.talking || self.busy || self.headpat_active > 0.0 || self.music_active;
-        if self.fps >= 30 && busy {
-            self.fps.max(60)
-        } else {
+        let busy = self.rig.is_none() || self.talking || self.busy || self.headpat_active > 0.0
+            || self.music_active || self.body != BodyMode::Ground;
+        if busy {
             self.fps
+        } else {
+            self.fps.min(15)
         }
     }
 
@@ -196,7 +199,15 @@ pub fn manage_model(
         BUNDLED_MODEL.to_string()
     };
     log::info!("loading avatar model {path}");
-    let handle: Handle<bevy::gltf::Gltf> = asset_server.load(path.clone());
+    let handle: Handle<bevy::gltf::Gltf> = asset_server.load_builder()
+        .with_settings(|settings: &mut bevy::gltf::GltfLoaderSettings| {
+            // Keep meshes available for skinned visibility bounds, but release CPU texture
+            // pixels after upload. The material assets remain available for expressions.
+            settings.load_materials = bevy::asset::RenderAssetUsages::RENDER_WORLD;
+            settings.load_cameras = false;
+            settings.load_lights = false;
+        })
+        .load(path.clone());
     let mut root = commands.spawn((VrmHandle(handle.clone()), Transform::default()));
     if let Some(target) = state.look_target {
         root.insert(LookAt::Target(target));
@@ -424,15 +435,28 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_rate_boost_needs_the_normal_rate() {
-        let mut state = AvatarState { busy: true, ..default() };
-        assert_eq!(state.effective_fps(), 60);
+    fn frame_rate_adapts_without_exceeding_the_requested_ceiling() {
+        let mut state = AvatarState { rig: Some(Rig::synthetic(&[])), ..default() };
+        assert_eq!(state.effective_fps(), 15, "rest uses half the normal rate");
+        state.busy = true;
+        assert_eq!(state.effective_fps(), 30);
         state.fps = 10;
         assert_eq!(state.effective_fps(), 10, "game mode stays slow");
         state.fps = 0;
         assert_eq!(state.effective_fps(), 0, "paused stays paused");
         state.busy = false;
         state.fps = 30;
+        for mode in [BodyMode::Air, BodyMode::Held] {
+            state.body = mode;
+            assert_eq!(state.effective_fps(), 30, "physics stays smooth");
+        }
+        state.body = BodyMode::Ground;
+        state.talking = true;
         assert_eq!(state.effective_fps(), 30);
+        state.talking = false;
+        state.music_active = true;
+        assert_eq!(state.effective_fps(), 30);
+        state.fps = 0;
+        assert_eq!(state.effective_fps(), 0);
     }
 }

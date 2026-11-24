@@ -82,10 +82,12 @@ pub(crate) fn tick(app: &AppHandle, activity: &crate::desktop::presence::Activit
         return;
     }
     if let Some(ticket) = crate::valorant::begin_capture() {
+        app.borrow_mut().reaction_pending = true;
         std::thread::spawn(move || {
             let reading = crate::ai::tasks::valorant_frame(&ticket.account);
             let record = crate::valorant::finish_capture(ticket, reading);
             post(move |app| {
+                app.borrow_mut().reaction_pending = false;
                 sync(app);
                 let Some(record) = record else { return };
                 let a = app.borrow();
